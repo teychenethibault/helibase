@@ -21,6 +21,18 @@ const SECTORS = { civil: 'Civil', etatique: 'Étatique', militaire: 'Militaire' 
 const EUROPE_BOUNDS = [[-25, 34], [45, 71.5]];
 const EUROPE_MAX = [[-45, 22], [65, 78]];
 const EMPTY_FILTERS = () => ({ q: '', country: '', model: '', activity: '', period: '', favOnly: false, sector: 'all' });
+// Propriétaires privés (holdings, particuliers) écartés : on ne garde un exploitant civil nommé par un registre
+// que si quelque chose montre que c'est une vraie entreprise d'hélicoptères ou un service public.
+const AVIATION_NAME = /h[ée]li|hélico|helico|helikopter|hubschrauber|elicott|helicop|\bair|aero|aéro|avia|flug|luft|rotor|wing|sky|fly|jet\b|samu|smur|rega\b|police|polizei|politi|gendarm|sécurité civile|securite civile|protection civile|civil protection|douane|zoll|minist|armée|forces|army|navy|guard|garde|secours|rescue|ambulan|medic|hems|offshore|charter|taxi|travail aérien|travaux aériens|bergbahn|rettung|redning|pelastus|soccorso|emergenc/i;
+function isRealOperator(o) {
+  if (o.is_placeholder || (o.sector && o.sector !== 'civil')) return true;
+  if (state.favorites.has(o.id)) return true;                       // gardé si un utilisateur l'a mis en favori
+  if ((o.fleet_count || 0) + (o.planned_count || 0) >= 2) return true;  // plusieurs appareils neufs : vraie flotte
+  if (AVIATION_NAME.test(o.name || '')) return true;
+  if (o.website || o.summary || o.info_edited_at) return true;     // présence publique trouvée ou fiche complétée
+  return false;
+}
+
 function fmtDelivery(date, precision) {
   if (!date) return '';
   if (precision === 'annee_estimee') return date.slice(0, 4) + ' (estimé)';
@@ -248,8 +260,10 @@ async function loadOperators() {
   if (ops.error) throw ops.error;
   if (favs.error) throw favs.error;
   // Par sécurité, un exploitant n'apparaît que s'il a au moins un appareil ou une livraison connue
-  state.operators = (ops.data || []).filter((o) => o.fleet_count > 0 || o.planned_count > 0 || o.last_delivery_date || o.last_delivery_model);
   state.favorites = new Set((favs.data || []).map((f) => f.operator_id));
+  state.operators = (ops.data || [])
+    .filter((o) => o.fleet_count > 0 || o.planned_count > 0 || o.last_delivery_date || o.last_delivery_model)
+    .filter((o) => isRealOperator(o));
 }
 
 async function toggleFavorite(operatorId, button) {
