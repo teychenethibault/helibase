@@ -35,6 +35,7 @@ from helibase.europe import EUROPE, country_name, is_europe  # noqa: E402
 from helibase.names import infer_activities, is_financial, is_stock, name_key, pretty_name  # noqa: E402
 
 SINCE_YEAR = 2024
+CODE_VERSION = '13.2'
 CALIBRATED = {'Ecureuil', 'H135', 'BK117', 'H160', 'H140'}
 SOURCE_LABEL = 'Rotorspot (listes de production)'
 SOURCE_URL = 'https://www.rotorspot.nl/product.php'
@@ -66,10 +67,26 @@ def calibrate(log=print):
             if len(ns) >= 3:
                 t[y] = ns[max(0, int(len(ns) * 0.1) - 0)]     # 10e centile : écarte les rares retardataires
         if t:
+            t = complete_years(t)
             cal[fam] = t
             log(f'  {fam} : ' + ', '.join(f'{y} ≥ n° {n}' for y, n in sorted(t.items())))
     cal['H140'] = {SINCE_YEAR: 0}     # modèle entièrement nouveau : tous ses exemplaires sont récents
     return cal
+
+
+def complete_years(t):
+    """Complète les années manquantes (trop peu d'appareils américains pour les calibrer) au rythme de production
+    des années voisines. Ex. H160 : 2025 ≥ 1044 et 2026 ≥ 1082 → 2024 ≥ 1006 (estimé)."""
+    t = dict(t)
+    this_year = dt.date.today().year
+    ys = sorted(t)
+    if len(ys) >= 2:
+        step = max(1, (t[ys[-1]] - t[ys[0]]) // (ys[-1] - ys[0]))
+        for y in range(ys[0] - 1, SINCE_YEAR - 1, -1):
+            t[y] = max(0, t[y + 1] - step)
+        for y in range(ys[-1] + 1, this_year + 1):
+            t[y] = t[y - 1] + step
+    return t
 
 
 def est_year(cal, family, msn):
@@ -86,33 +103,53 @@ def est_year(cal, family, msn):
 SWEDEN_URL = 'https://github.com/civictechsweden/oppna-luftfartygsregistret/raw/refs/heads/master/register_light.json'
 
 
-def src_suede():
+def src_suede(log=print):
     """Registre suédois (Transportstyrelsen), republié en données libres CC0 par Civic Tech Sweden.
-    Le format exact n'étant pas documenté, la lecture repère les champs par leur contenu."""
+    Le format n'étant pas documenté, la lecture repère les champs par leur contenu."""
     import json as _json
     from helibase.tables import http_get
     data = _json.loads(http_get(SWEDEN_URL))
-    rows = data if isinstance(data, list) else list(data.values()) if isinstance(data, dict) else []
+    # Formes possibles : liste d'appareils, {"RHJ": {...}}, ou {"aircrafts": [...]}
+    items = []
+    if isinstance(data, list):
+        items = [(None, a) for a in data]
+    elif isinstance(data, dict):
+        lists = [v for v in data.values() if isinstance(v, list) and v and isinstance(v[0], dict)]
+        if lists and len(lists) <= 3:
+            items = [(None, a) for v in lists for a in v]
+        else:
+            items = [(k, v) for k, v in data.items() if isinstance(v, dict)]
+
+    def find_reg(k, a):
+        for cand in ([k] if k else []) + [v for kk, v in a.items() if isinstance(v, str) and re.search(r'reg|beteck|mark|^id$', kk, re.I)] \
+                + [v for v in a.values() if isinstance(v, str)]:
+            c = (cand or '').strip().upper()
+            if re.fullmatch(r'SE-[A-Z]{3}', c):
+                return c
+            if re.fullmatch(r'[A-Z]{3}', c) and (cand is k or True):
+                return 'SE-' + c
+        return None
+
     out = []
-    for a in rows:
-        if not isinstance(a, dict):
-            continue
-        reg = None
-        for k, v in a.items():
-            if isinstance(v, str) and re.fullmatch(r'(SE-)?[A-Z]{3}', v.strip()) and ('reg' in k.lower() or 'beteck' in k.lower() or k.lower() in ('id', 'mark')):
-                reg = v.strip()
-                break
+    for k, a in items:
+        reg = find_reg(k, a)
         if not reg:
             continue
-        reg = reg if reg.startswith('SE-') else 'SE-' + reg
-        owners = [o for o in (a.get('owners') or []) if isinstance(o, dict) and o.get('name')]
+        owners = []
+        for v in a.values():
+            if isinstance(v, list):
+                owners += [o for o in v if isinstance(o, dict) and (o.get('name') or o.get('namn'))]
         # « Brukare / innehavare » (utilisateur) avant « Ägare » (propriétaire, souvent une société de leasing)
-        owners.sort(key=lambda o: 0 if re.search(r'bruk|innehav|operat', str(o.get('type', '')), re.I) else 1)
+        owners.sort(key=lambda o: 0 if re.search(r'bruk|innehav|operat|user', str(o.get('type', '')), re.I) else 1)
         if not owners:
             continue
         o = owners[0]
-        city = next((str(v) for k, v in o.items() if re.search(r'city|ort|postort', k, re.I) and isinstance(v, str)), None)
-        out.append({'registration': reg, 'owner': o['name'], 'city': city, 'address': None, 'government': False})
+        city = next((str(v) for kk, v in o.items() if re.search(r'city|ort|postort', kk, re.I) and isinstance(v, str)), None)
+        out.append({'registration': reg, 'owner': o.get('name') or o.get('namn'), 'city': city, 'address': None,
+                    'government': False})
+    if not out and items:     # format inattendu : on l'affiche pour l'adapter au prochain passage
+        k, a = items[0]
+        log(f'  registre Suède : format non reconnu, exemple : {str(k)[:20]} {_json.dumps(a, ensure_ascii=False)[:600]}')
     return None, None, out
 
 
@@ -327,14 +364,17 @@ def main():
 
     print('Lecture de Rotorspot…')
     pages = R.fetch_all()
-    changed = [pg for pg, (_, h) in pages.items() if args.force or (cache_get('rotorspot:' + pg) or {}).get('hash') != h]
+    # Nouvelle version du programme : tout est réanalysé une fois, même si Rotorspot n'a pas changé
+    new_code = (cache_get('rotorspot:version') or {}).get('hash') != CODE_VERSION
+    changed = [pg for pg, (_, h) in pages.items()
+               if args.force or new_code or (cache_get('rotorspot:' + pg) or {}).get('hash') != h]
     if not changed:
         print('Aucune page n\'a changé depuis le dernier passage : rien à faire.')
         return
     print(f'{len(changed)} page(s) modifiée(s) depuis le dernier passage')
 
     cached_cal = cache_get('calibration')
-    if cached_cal and cached_cal.get('payload') and not args.force and \
+    if cached_cal and cached_cal.get('payload') and not args.force and not new_code and \
             cached_cal['fetched_at'][:7] == dt.date.today().isoformat()[:7]:
         cal = {f: {int(y): n for y, n in t.items()} for f, t in cached_cal['payload'].items()}
     else:
@@ -369,6 +409,7 @@ def main():
     cache_put('rotorspot:known', payload=all_keys)
     for pg, (_, h) in pages.items():
         cache_put('rotorspot:' + pg, h=h)
+    cache_put('rotorspot:version', h=CODE_VERSION)
 
 
 if __name__ == '__main__':

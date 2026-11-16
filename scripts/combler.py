@@ -7,10 +7,12 @@ Un appareil n'est rattaché à un exploitant que si une preuve explicite le reli
      l'immatriculation de l'appareil.
   2. Site de l'exploitant : la page « flotte » d'un exploitant connu affiche l'immatriculation.
      robots.txt respecté, 6 pages au plus par site, pause entre les pages, robot identifié.
-  3. Recherche web vérifiée (Gemini + Google Search, offre gratuite) : Gemini propose un exploitant et ses
+  3. Wikimedia Commons : photos de l'appareil (immatriculation dans le titre, la description ou les catégories)
+     classées dans la catégorie d'un exploitant ; un seul exploitant possible, sinon rien.
+  4. Recherche web vérifiée (Gemini + Google Search, offre gratuite) : Gemini propose un exploitant et ses
      sources ; le rattachement n'est fait que si une page source, relue par nos soins, contient à la fois
      l'immatriculation ET le nom de l'exploitant.
-  4. Presse — correspondance unique : une livraison annoncée dans la presse (exploitant, pays, modèle, mois)
+  5. Presse — correspondance unique : une livraison annoncée dans la presse (exploitant, pays, modèle, mois)
      correspond à UN SEUL appareil « à identifier » apparu le même mois. Deux candidats ou plus : rien n'est fait.
 
 Chaque rattachement crée une source (lien cliquable sur la fiche) et note la méthode employée.
@@ -247,6 +249,85 @@ def from_operator_sites(ctx, minutes):
 
 
 # ---------------------------------------------------------------------------
+# 2 bis. Wikimedia Commons (photos d'aviation classées par immatriculation et par exploitant)
+# ---------------------------------------------------------------------------
+COMMONS = 'https://commons.wikimedia.org/w/api.php'
+NOT_OPERATOR = re.compile(r'airbus|eurocopter|aerospatiale|mbb|\bh ?1\d\d|\bec ?1\d\d|bk ?117|helicopters? in |'
+                          r'aircraft in |registered|photograph|taken|airport|aerodrome|heliport|flugplatz|\bin \d{4}|'
+                          r'^\d{4}|files? |quality|assessed|license|cc-by|self-published|uploaded|spotting|'
+                          r'by registration|by operator|by country|by type|airshow|air show|flight|\bmodels?\b', re.I)
+
+
+def commons_api(params):
+    q = urllib.parse.urlencode({**params, 'format': 'json', 'formatversion': 2})
+    _, txt = fetch(f'{COMMONS}?{q}', timeout=30)
+    return json.loads(txt or '{}')
+
+
+def commons_candidates(reg):
+    """Exploitants cités par les photos Commons de cette immatriculation : {nom: [url du fichier]}"""
+    found = commons_api({'action': 'query', 'list': 'search', 'srsearch': f'"{reg}"', 'srnamespace': 6, 'srlimit': 15})
+    titles = [r['title'] for r in found.get('query', {}).get('search', [])]
+    if not titles:
+        return {}
+    time.sleep(1)
+    info = commons_api({'action': 'query', 'titles': '|'.join(titles[:15]), 'prop': 'categories|imageinfo',
+                        'clshow': '!hidden', 'cllimit': 'max', 'iiprop': 'extmetadata|url'})
+    pat = reg_pattern(reg)
+    out = {}
+    for pg in info.get('query', {}).get('pages', []):
+        meta = ((pg.get('imageinfo') or [{}])[0].get('extmetadata') or {})
+        desc = page_text((meta.get('ImageDescription') or {}).get('value', ''))
+        cats = [c['title'].split(':', 1)[-1] for c in pg.get('categories', [])]
+        if not (pat.search(pg['title']) or pat.search(desc) or any(pat.search(c) for c in cats)):
+            continue        # la photo doit concerner CETTE immatriculation
+        url = (pg.get('imageinfo') or [{}])[0].get('descriptionurl') or \
+            'https://commons.wikimedia.org/wiki/' + urllib.parse.quote(pg['title'].replace(' ', '_'))
+        for c in cats:
+            m = (re.match(r'^(?:Aircraft|Helicopters|Airbus Helicopters [\w\- ]+?) (?:of|operated by) (.+)$', c)
+                 or re.match(r'^(.+?) \((?:aircraft|helicopters|fleet)\)$', c, re.I))
+            if m:
+                name = m.group(1).strip()
+                if not NOT_OPERATOR.search(name) and len(name) > 2:
+                    out.setdefault(name, []).append(url)
+    return out
+
+
+def from_commons(ctx, minutes):
+    pend = ctx.pending()
+    if not pend:
+        return
+    tried = {}
+    if not ctx.dry:
+        tried = {r['key']: r['fetched_at'] for r in ctx.store.select('source_cache', 'key,fetched_at', key='like.commons:*')}
+    retry_after = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=30)).isoformat()
+    pend = [a for a in pend if (tried.get('commons:' + a['registration']) or '') < retry_after]
+    print(f'  Wikimedia Commons : {len(pend)} immatriculation(s) à chercher')
+    start, n, ambiguous = time.time(), 0, 0
+    for a in pend:
+        if time.time() - start > minutes * 60:
+            break
+        try:
+            cands = commons_candidates(a['registration'])
+        except Exception as e:
+            print(f'  Wikimedia Commons : {a["registration"]} ignoré ({e})')
+            continue
+        finally:
+            time.sleep(1.5)
+        if not ctx.dry:
+            ctx.store.insert('source_cache', [{'key': 'commons:' + a['registration'], 'payload': {'candidats': list(cands)},
+                                               'fetched_at': dt.datetime.now(dt.timezone.utc).isoformat()}],
+                             on_conflict='key')
+        if len(cands) == 1:
+            name, urls = next(iter(cands.items()))
+            n += ctx.link(a, name, a['country'], 'commons', 'recherche_web',
+                          'Wikimedia Commons (photo de l\'appareil classée chez cet exploitant)', urls[0], 3)
+        elif len(cands) > 1:
+            ambiguous += 1      # plusieurs exploitants possibles (revente, location…) : on ne choisit pas
+    print(f'  Wikimedia Commons : {n} appareil(s) rattaché(s), {ambiguous} cas ambigu(s) laissé(s) de côté')
+
+
+# ---------------------------------------------------------------------------
 # 3. Recherche web vérifiée (Gemini + Google Search)
 # ---------------------------------------------------------------------------
 API = 'https://generativelanguage.googleapis.com/v1beta'
@@ -263,8 +344,8 @@ def gemini_search(key, model, a):
               'réponds {"operator": null}.')
     body = json.dumps({'contents': [{'parts': [{'text': prompt}]}], 'tools': [{'google_search': {}}],
                        'generationConfig': {'temperature': 0}}).encode()
-    req = urllib.request.Request(f'{API}/{model}:generateContent?key={key}', data=body, method='POST',
-                                 headers={'Content-Type': 'application/json'})
+    req = urllib.request.Request(f'{API}/{model}:generateContent', data=body, method='POST',
+                                 headers={'Content-Type': 'application/json', 'x-goog-api-key': key})
     with urllib.request.urlopen(req, timeout=120) as resp:
         out = json.loads(resp.read())
     cand = (out.get('candidates') or [{}])[0]
@@ -289,31 +370,44 @@ def from_web_search(ctx, minutes, limit):
         return
     if not pend:
         return
-    from presse_europe import pick_model
-    model = pick_model(key)
+    from presse_europe import pick_models, quota_reason
+    try:
+        models = pick_models(key)
+    except Exception as e:
+        print(f'  recherche web : Gemini injoignable ({e}), méthode reportée')
+        return
     tried = {}
     if not ctx.dry:
         tried = {r['key']: r['fetched_at'] for r in ctx.store.select('source_cache', 'key,fetched_at', key='like.web:*')}
     retry_after = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=30)).isoformat()
     pend = [a for a in pend if (tried.get('web:' + a['registration']) or '') < retry_after][:limit]
-    print(f'  recherche web : {len(pend)} immatriculation(s) à chercher (modèle {model})')
+    print(f'  recherche web : {len(pend)} immatriculation(s) à chercher (modèles disponibles : {", ".join(m.split("/")[-1] for m in models[:4])})')
     start, n, rejected = time.time(), 0, 0
     for a in pend:
-        if time.time() - start > minutes * 60:
+        if time.time() - start > minutes * 60 or not models:
             break
-        try:
-            ans, urls = gemini_search(key, model, a)
-        except urllib.error.HTTPError as e:
-            if e.code == 429:
-                print('  recherche web : quota gratuit du jour atteint, reprise au prochain passage')
-                break
-            print(f'  recherche web : erreur {e.code} ({e.read()[:200]!r}), méthode arrêtée')
+        ans = None
+        while models and ans is None:
+            try:
+                ans, urls = gemini_search(key, models[0], a)
+            except urllib.error.HTTPError as e:
+                body = e.read()
+                if e.code == 429:
+                    per_minute, why = quota_reason(body)
+                    if per_minute:
+                        time.sleep(60)
+                        continue
+                    print(f'  recherche web : quota épuisé pour {models[0].split("/")[-1]} ({why})')
+                else:
+                    print(f'  recherche web : {models[0].split("/")[-1]} refuse la recherche (erreur {e.code} : {body[:200]!r})')
+                models.pop(0)       # modèle suivant (les quotas gratuits sont propres à chaque modèle)
+            except Exception as e:
+                print(f'  recherche web : {a["registration"]} ignoré ({e})')
+                ans, urls = {}, []
+        time.sleep(7)
+        if ans is None:
+            print('  recherche web : aucun modèle Gemini disponible aujourd\'hui, reprise au prochain passage')
             break
-        except Exception as e:
-            print(f'  recherche web : {a["registration"]} ignoré ({e})')
-            continue
-        finally:
-            time.sleep(7)
         if not ctx.dry:
             ctx.store.insert('source_cache', [{'key': 'web:' + a['registration'], 'payload': {'answer': ans},
                                                'fetched_at': dt.datetime.now(dt.timezone.utc).isoformat()}],
@@ -368,7 +462,7 @@ def from_press_unique(ctx):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--dry-run', action='store_true')
-    p.add_argument('--only', choices=['presse', 'site', 'web', 'unique'])
+    p.add_argument('--only', choices=['presse', 'site', 'commons', 'web', 'unique'])
     p.add_argument('--minutes', type=int, default=60)
     p.add_argument('--web-limit', type=int, default=200, help='recherches web au plus par passage')
     args = p.parse_args()
@@ -378,8 +472,9 @@ def main():
     before = len(ctx.todo)
     print(f'{before} appareils dont l\'exploitant est à identifier')
     steps = [('presse', lambda: from_press_registrations(ctx)),
-             ('site', lambda: from_operator_sites(ctx, args.minutes // 2)),
-             ('web', lambda: from_web_search(ctx, args.minutes // 2, args.web_limit)),
+             ('site', lambda: from_operator_sites(ctx, args.minutes // 3)),
+             ('commons', lambda: from_commons(ctx, args.minutes // 3)),
+             ('web', lambda: from_web_search(ctx, args.minutes // 3, args.web_limit)),
              ('unique', lambda: from_press_unique(ctx))]
     for name, fn in steps:
         if args.only in (None, name):

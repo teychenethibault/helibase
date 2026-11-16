@@ -54,8 +54,8 @@ NS = {'content': 'http://purl.org/rss/1.0/modules/content/'}
 # ---------------------------------------------------------------------------
 # Lecture des flux
 # ---------------------------------------------------------------------------
-def get(url, timeout=60):
-    req = urllib.request.Request(url, headers={'User-Agent': UA, 'Accept': 'application/rss+xml,text/xml,*/*'})
+def get(url, timeout=60, headers=None):
+    req = urllib.request.Request(url, headers={'User-Agent': UA, 'Accept': 'application/rss+xml,text/xml,*/*', **(headers or {})})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
 
@@ -108,8 +108,9 @@ def read_feed(name, url, paged, backfill, log=print):
 API = 'https://generativelanguage.googleapis.com/v1beta'
 
 
-def pick_model(key):
-    data = json.loads(get(f'{API}/models?key={key}&pageSize=200'))
+def pick_models(key):
+    # La clé passe dans l'en-tête (jamais dans l'adresse) : marche avec les clés « AQ. » comme « AIza »
+    data = json.loads(get(f'{API}/models?pageSize=200', headers={'x-goog-api-key': key}))
     names = [m['name'] for m in data.get('models', [])
              if 'generateContent' in m.get('supportedGenerationMethods', [])
              and 'flash' in m['name'] and not re.search(r'image|tts|live|audio|thinking|exp|preview|embedding', m['name'])]
@@ -118,7 +119,21 @@ def pick_model(key):
     def score(n):   # version la plus récente, et la version complète avant « lite »
         v = re.findall(r'(\d+(?:\.\d+)?)', n)
         return (float(v[0]) if v else 0, 'lite' not in n)
-    return sorted(names, key=score)[-1]
+    return sorted(names, key=score, reverse=True)
+
+
+def pick_model(key):
+    return pick_models(key)[0]
+
+
+def quota_reason(err_body):
+    """Explication courte d'un refus 429 de Gemini : (quota du jour ou par minute ?, texte)."""
+    try:
+        msg = json.loads(err_body).get('error', {}).get('message', '')
+    except Exception:
+        msg = err_body.decode('utf-8', 'replace') if isinstance(err_body, bytes) else str(err_body)
+    per_minute = bool(re.search(r'PerMinute|per minute', msg, re.I)) and not re.search(r'PerDay|per day|limit: 0', msg, re.I)
+    return per_minute, re.sub(r'\s+', ' ', msg)[:300]
 
 
 PROMPT = """Tu es un analyste de l'industrie des hélicoptères. Pour chaque article ci-dessous, extrais les
@@ -152,24 +167,37 @@ def ask_gemini(key, model, articles, log=print):
     payload = json.dumps({'contents': [{'parts': [{'text': body}]}],
                           'generationConfig': {'temperature': 0, 'responseMimeType': 'application/json'}}).encode()
     for attempt in range(4):
-        req = urllib.request.Request(f'{API}/{model}:generateContent?key={key}', data=payload, method='POST',
-                                     headers={'Content-Type': 'application/json'})
+        req = urllib.request.Request(f'{API}/{model}:generateContent', data=payload, method='POST',
+                                     headers={'Content-Type': 'application/json', 'x-goog-api-key': key})
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=300) as resp:
                 out = json.loads(resp.read())
             text = out['candidates'][0]['content']['parts'][0]['text']
             return json.loads(text).get('events', [])
         except urllib.error.HTTPError as e:
-            if e.code in (429, 500, 503) and attempt < 3:
+            if e.code == 429:
+                per_minute, why = quota_reason(e.read())
+                if not per_minute:
+                    log(f'    quota épuisé pour {model.split("/")[-1]} ({why})')
+                    return 'quota'
+            if e.code in (429, 500, 502, 503, 504) and attempt < 3:
                 wait = 30 * (attempt + 1)
                 log(f'    Gemini occupé ({e.code}), nouvel essai dans {wait} s')
                 time.sleep(wait)
                 continue
-            raise
+            log(f'    Gemini a refusé la demande ({e.code}) : lot reporté au prochain passage')
+            return None
+        except (TimeoutError, urllib.error.URLError, OSError) as e:
+            if attempt < 3:
+                log(f'    Gemini ne répond pas ({e}), nouvel essai dans 20 s')
+                time.sleep(20)
+                continue
+            log('    Gemini injoignable : lot reporté au prochain passage')
+            return None
         except (KeyError, IndexError, json.JSONDecodeError) as e:
             log(f'    réponse Gemini illisible ({e}), lot ignoré')
             return []
-    return []
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -210,100 +238,119 @@ def main():
     if not todo:
         return
 
-    model = pick_model(key)
-    print(f'Modèle Gemini : {model}')
-    events = []
-    for i in range(0, len(todo), args.batch):
-        chunk = todo[i:i + args.batch]
-        for e in ask_gemini(key, model, chunk):
-            try:
-                a = chunk[int(e.get('article'))]
-            except (TypeError, ValueError, IndexError):
+    try:
+        models = pick_models(key)
+    except Exception as e:
+        print(f'Gemini injoignable ({e}) : veille presse reportée au prochain passage')
+        return
+    print(f'Modèles Gemini : {", ".join(m.split("/")[-1] for m in models[:4])}')
+    def process(todo):
+        events, failed = [], set()
+        for i in range(0, len(todo), args.batch):
+            chunk = todo[i:i + args.batch]
+            res = 'quota'
+            while res == 'quota' and models:
+                res = ask_gemini(key, models[0], chunk)
+                if res == 'quota':
+                    models.pop(0)       # quotas gratuits propres à chaque modèle : on passe au suivant
+            if res == 'quota' or res is None:
+                failed.update(x['key'] for x in chunk)
+                res = []
+            for e in res:
+                try:
+                    a = chunk[int(e.get('article'))]
+                except (TypeError, ValueError, IndexError):
+                    continue
+                events.append({**e, '_article': a})
+            time.sleep(6)     # offre gratuite : quelques requêtes par minute
+
+        kept = []
+        for e in events:
+            c = (e.get('country') or '').upper()
+            if e.get('confidence') not in ('high', 'medium') or not is_europe(c) or not e.get('model') \
+                    or e.get('type') not in ('order', 'loi', 'options', 'delivery'):
                 continue
-            events.append({**e, '_article': a})
-        time.sleep(6)     # offre gratuite : quelques requêtes par minute
+            if not e.get('operator') and not e.get('undisclosed'):
+                continue
+            e['country'] = c
+            kept.append(e)
+        def remember():   # articles analysés : jamais relus
+            ok = [a for a in todo if a['key'] not in failed]
+            for i in range(0, len(ok), 200):
+                store.insert('source_cache', [{'key': a['key'], 'payload': {'title': a['title'], 'link': a['link']}}
+                                              for a in ok[i:i + 200]], on_conflict='key')
 
-    kept = []
-    for e in events:
-        c = (e.get('country') or '').upper()
-        if e.get('confidence') not in ('high', 'medium') or not is_europe(c) or not e.get('model') \
-                or e.get('type') not in ('order', 'loi', 'options', 'delivery'):
-            continue
-        if not e.get('operator') and not e.get('undisclosed'):
-            continue
-        e['country'] = c
-        kept.append(e)
-    def remember():   # articles analysés : jamais relus
-        for i in range(0, len(todo), 200):
-            store.insert('source_cache', [{'key': a['key'], 'payload': {'title': a['title'], 'link': a['link']}}
-                                          for a in todo[i:i + 200]], on_conflict='key')
+        print(f'{len(events)} événements extraits, {len(kept)} retenus (Europe, confiance haute ou moyenne)')
+        for e in kept:
+            print(f"  {e['_article']['date']} {e['type']:<8} {e.get('operator') or 'client non divulgué'} ({e['country']}) — "
+                  f"{e.get('quantity') or ''}{'×' if e.get('quantity') else ''}{e['model']}  [{e['_article']['source']}]")
+        if args.dry_run:
+            return
+        if not kept:
+            remember()
+            return
 
-    print(f'{len(events)} événements extraits, {len(kept)} retenus (Europe, confiance haute ou moyenne)')
-    for e in kept:
-        print(f"  {e['_article']['date']} {e['type']:<8} {e.get('operator') or 'client non divulgué'} ({e['country']}) — "
-              f"{e.get('quantity') or ''}{'×' if e.get('quantity') else ''}{e['model']}  [{e['_article']['source']}]")
-    if args.dry_run:
-        return
-    if not kept:
+        ops = store.select('operators', 'id,name,aliases,country,is_placeholder')
+        by_key = {}
+        for o in ops:
+            for n in [o['name'], *(o.get('aliases') or [])]:
+                by_key[(name_key(n), o.get('country') or '')] = o
+        orders = store.select('orders', 'id,operator_id,model,status,firmness,announced_on,quantity')
+        added = merged = created = 0
+        for e in kept:
+            art = e['_article']
+            undisclosed = bool(e.get('undisclosed')) or not e.get('operator')
+            name = f'Client non divulgué — {country_name(e["country"])}' if undisclosed else e['operator'].strip()
+            k = (name_key(name), e['country'])
+            op = by_key.get(k)
+            if not op:
+                sector = e.get('sector') if e.get('sector') in ('civil', 'etatique', 'militaire') else 'civil'
+                acts = [x for x in ([e.get('activity')] + infer_activities(name)) if x in ACTIVITIES]
+                if sector == 'militaire' and 'Militaire' not in acts:
+                    acts.append('Militaire')
+                row = {'name': name, 'country': e['country'], 'sector': sector, 'is_placeholder': undisclosed,
+                       'activities': list(dict.fromkeys(acts))}
+                if undisclosed:
+                    row['lat'], row['lon'] = EUROPE[e['country']][1], EUROPE[e['country']][2]
+                op = store.insert('operators', [row])[0]
+                by_key[k] = op
+                created += 1
+            status = 'livree' if e['type'] == 'delivery' else 'annoncee'
+            firmness = {'order': 'ferme', 'loi': 'loi', 'options': 'options'}.get(e['type'])
+            date = (e.get('date') or art['date'] or '')[:10]
+            if len(date) == 7:
+                date += '-01'
+            if not re.match(r'^\d{4}-\d{2}-\d{2}$', date):
+                date = art['date']
+            ev_model = re.sub(r'\s+', '', e['model']).upper().replace('TIGER', 'Tigre').replace('TIGRE', 'Tigre')
+            qty = e.get('quantity') if isinstance(e.get('quantity'), int) and e['quantity'] > 0 else None
+            dup = next((o for o in orders if o['operator_id'] == op['id'] and o['model'] == ev_model and o['status'] == status
+                        and (o.get('firmness') or None) == firmness and o.get('announced_on')
+                        and abs((dt.date.fromisoformat(o['announced_on']) - dt.date.fromisoformat(date)).days) <= 60), None)
+            if dup:
+                if qty and (dup.get('quantity') or 0) < qty:
+                    store.update('orders', {'quantity': qty}, id=f'eq.{dup["id"]}')
+                merged += 1
+                continue
+            src = store.insert('sources', [{'kind': 'airbus' if art['source'] == 'Airbus' else 'presse',
+                                            'label': art['source'], 'url': art['link'] or None,
+                                            'retrieved_on': dt.date.today().isoformat(),
+                                            'confidence': 4 if art['source'] == 'Airbus' else 3}])[0]
+            regs = sorted({re.sub(r'\s+', '', r).upper() for r in (e.get('registrations') or [])
+                           if isinstance(r, str) and re.fullmatch(r'[A-Z0-9]{1,2}-?[A-Z0-9]{2,5}', re.sub(r'\s+', '', r).upper())})
+            row = store.insert('orders', [{'operator_id': op['id'], 'model': ev_model, 'quantity': qty, 'announced_on': date,
+                                           'status': status, 'firmness': firmness, 'source_id': src['id'],
+                                           'registrations': regs or None}])[0]
+            orders.append(row)
+            added += 1
         remember()
-        return
+        store.insert('update_log', [{'source': 'Veille presse Europe (Gemini)', 'added': added, 'changed': merged, 'queued': 0}])
+        print(f'Résultat : {added} commandes ou livraisons ajoutées, {merged} doublons fusionnés, {created} exploitants créés')
 
-    ops = store.select('operators', 'id,name,aliases,country,is_placeholder')
-    by_key = {}
-    for o in ops:
-        for n in [o['name'], *(o.get('aliases') or [])]:
-            by_key[(name_key(n), o.get('country') or '')] = o
-    orders = store.select('orders', 'id,operator_id,model,status,firmness,announced_on,quantity')
-    added = merged = created = 0
-    for e in kept:
-        art = e['_article']
-        undisclosed = bool(e.get('undisclosed')) or not e.get('operator')
-        name = f'Client non divulgué — {country_name(e["country"])}' if undisclosed else e['operator'].strip()
-        k = (name_key(name), e['country'])
-        op = by_key.get(k)
-        if not op:
-            sector = e.get('sector') if e.get('sector') in ('civil', 'etatique', 'militaire') else 'civil'
-            acts = [x for x in ([e.get('activity')] + infer_activities(name)) if x in ACTIVITIES]
-            if sector == 'militaire' and 'Militaire' not in acts:
-                acts.append('Militaire')
-            row = {'name': name, 'country': e['country'], 'sector': sector, 'is_placeholder': undisclosed,
-                   'activities': list(dict.fromkeys(acts))}
-            if undisclosed:
-                row['lat'], row['lon'] = EUROPE[e['country']][1], EUROPE[e['country']][2]
-            op = store.insert('operators', [row])[0]
-            by_key[k] = op
-            created += 1
-        status = 'livree' if e['type'] == 'delivery' else 'annoncee'
-        firmness = {'order': 'ferme', 'loi': 'loi', 'options': 'options'}.get(e['type'])
-        date = (e.get('date') or art['date'] or '')[:10]
-        if len(date) == 7:
-            date += '-01'
-        if not re.match(r'^\d{4}-\d{2}-\d{2}$', date):
-            date = art['date']
-        model = re.sub(r'\s+', '', e['model']).upper().replace('TIGER', 'Tigre').replace('TIGRE', 'Tigre')
-        qty = e.get('quantity') if isinstance(e.get('quantity'), int) and e['quantity'] > 0 else None
-        dup = next((o for o in orders if o['operator_id'] == op['id'] and o['model'] == model and o['status'] == status
-                    and (o.get('firmness') or None) == firmness and o.get('announced_on')
-                    and abs((dt.date.fromisoformat(o['announced_on']) - dt.date.fromisoformat(date)).days) <= 60), None)
-        if dup:
-            if qty and (dup.get('quantity') or 0) < qty:
-                store.update('orders', {'quantity': qty}, id=f'eq.{dup["id"]}')
-            merged += 1
-            continue
-        src = store.insert('sources', [{'kind': 'airbus' if art['source'] == 'Airbus' else 'presse',
-                                        'label': art['source'], 'url': art['link'] or None,
-                                        'retrieved_on': dt.date.today().isoformat(),
-                                        'confidence': 4 if art['source'] == 'Airbus' else 3}])[0]
-        regs = sorted({re.sub(r'\s+', '', r).upper() for r in (e.get('registrations') or [])
-                       if isinstance(r, str) and re.fullmatch(r'[A-Z0-9]{1,2}-?[A-Z0-9]{2,5}', re.sub(r'\s+', '', r).upper())})
-        row = store.insert('orders', [{'operator_id': op['id'], 'model': model, 'quantity': qty, 'announced_on': date,
-                                       'status': status, 'firmness': firmness, 'source_id': src['id'],
-                                       'registrations': regs or None}])[0]
-        orders.append(row)
-        added += 1
-    remember()
-    store.insert('update_log', [{'source': 'Veille presse Europe (Gemini)', 'added': added, 'changed': merged, 'queued': 0}])
-    print(f'Résultat : {added} commandes ou livraisons ajoutées, {merged} doublons fusionnés, {created} exploitants créés')
+    step = args.batch * 10
+    for r in range(0, len(todo), step):
+        print(f'— Tranche {r // step + 1} / {(len(todo) - 1) // step + 1}')
+        process(todo[r:r + step])
 
 
 if __name__ == '__main__':
