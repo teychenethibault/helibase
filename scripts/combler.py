@@ -370,9 +370,9 @@ def from_web_search(ctx, minutes, limit):
         return
     if not pend:
         return
-    from presse_europe import pick_models, quota_reason
+    from presse_europe import working_models, quota_reason
     try:
-        models = pick_models(key)
+        models = working_models(key, log=lambda m: print('  ' + m))
     except Exception as e:
         print(f'  recherche web : Gemini injoignable ({e}), méthode reportée')
         return

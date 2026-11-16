@@ -39,7 +39,6 @@ UA = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 '
       '(KHTML, like Gecko) Version/17.5 Safari/605.1.15')
 SINCE = '2024-01-01'
 FEEDS = [
-    ('Airbus', 'https://www.airbus.com/en/generate-rss-feeds?tid=15581&fid=29716', False),
     ('HeliHub', 'https://www.helihub.com/tag/airbus-helicopters/feed/', True),
     ('Vertical', 'https://verticalmag.com/feed/', True),
 ]
@@ -93,7 +92,7 @@ def read_feed(name, url, paged, backfill, log=print):
                 content = it.find('content:encoded', NS)
                 batch.append({'source': name, 'title': clean(it.findtext('title')), 'link': (it.findtext('link') or '').strip(),
                               'date': parse_date(it.findtext('pubDate')),
-                              'text': clean((content.text if content is not None else '') or it.findtext('description'))[:3000]})
+                              'text': clean((content.text if content is not None else '') or it.findtext('description'))[:1800]})
         except ET.ParseError:
             # Flux légèrement mal formé (fréquent) : lecture article par article
             txt = raw.decode('utf-8', 'replace')
@@ -104,7 +103,7 @@ def read_feed(name, url, paged, backfill, log=print):
             for block in re.findall(r'<item[\s>][\s\S]*?</item>', txt):
                 batch.append({'source': name, 'title': clean(tag(block, 'title')), 'link': clean(tag(block, 'link')),
                               'date': parse_date(clean(tag(block, 'pubDate'))),
-                              'text': clean(tag(block, 'content:encoded') or tag(block, 'description'))[:3000]})
+                              'text': clean(tag(block, 'content:encoded') or tag(block, 'description'))[:1800]})
             if not batch and page == 1:
                 log(f'  {name} : flux illisible (début : {txt[:120]!r})')
         items += batch
@@ -139,6 +138,30 @@ def pick_models(key):
 
 def pick_model(key):
     return pick_models(key)[0]
+
+
+def working_models(key, log=print, want=3):
+    """Essaie chaque modèle avec une toute petite question et garde ceux qui répondent vraiment
+    (les modèles les plus récents sont souvent saturés pour l'offre gratuite)."""
+    ok = []
+    body = json.dumps({'contents': [{'parts': [{'text': 'Réponds juste OK.'}]}],
+                       'generationConfig': {'temperature': 0, 'maxOutputTokens': 5}}).encode()
+    for m in pick_models(key):
+        req = urllib.request.Request(f'{API}/{m}:generateContent', data=body, method='POST',
+                                     headers={'Content-Type': 'application/json', 'x-goog-api-key': key})
+        try:
+            with urllib.request.urlopen(req, timeout=40) as resp:
+                resp.read()
+            ok.append(m)
+            log(f'  {m.split("/")[-1]} : disponible')
+            if len(ok) >= want:
+                break
+        except urllib.error.HTTPError as e:
+            log(f'  {m.split("/")[-1]} : indisponible ({e.code} — {quota_reason(e.read())[1][:160]})')
+        except Exception as e:
+            log(f'  {m.split("/")[-1]} : indisponible ({e})')
+        time.sleep(2)
+    return ok
 
 
 def quota_reason(err_body):
@@ -196,7 +219,7 @@ def ask_gemini(key, model, articles, log=print):
                     log(f'    quota épuisé pour {model.split("/")[-1]} ({why})')
                     return 'quota'
             if e.code in (500, 502, 503, 504) and attempt >= 1:
-                log(f'    {model.split("/")[-1]} surchargé ({e.code}) : passage au modèle suivant')
+                log(f'    {model.split("/")[-1]} surchargé ({e.code} — {quota_reason(e.read())[1][:120]}) : modèle suivant')
                 return 'quota'
             if e.code in (429, 500, 502, 503, 504) and attempt < 3:
                 wait = 20
@@ -222,7 +245,7 @@ def ask_gemini(key, model, articles, log=print):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--dry-run', action='store_true')
-    p.add_argument('--batch', type=int, default=8)
+    p.add_argument('--batch', type=int, default=5)
     args = p.parse_args()
 
     key = os.environ.get('GEMINI_API_KEY')
@@ -256,12 +279,15 @@ def main():
     if not todo:
         return
 
+    print('Test des modèles Gemini :')
     try:
-        models = pick_models(key)
+        models = working_models(key)
     except Exception as e:
         print(f'Gemini injoignable ({e}) : veille presse reportée au prochain passage')
         return
-    print(f'Modèles Gemini : {", ".join(m.split("/")[-1] for m in models[:4])}')
+    if not models:
+        print('Aucun modèle Gemini ne répond aujourd\'hui : veille presse reportée au prochain passage')
+        return
     def process(todo):
         events, failed = [], set()
         for i in range(0, len(todo), args.batch):
