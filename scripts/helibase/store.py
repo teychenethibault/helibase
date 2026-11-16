@@ -70,3 +70,8 @@ class Store:
 
     def update(self, table, values, **filters):
         return self._call('PATCH', table, filters, values, prefer='return=representation')
+
+    def delete(self, table, **filters):
+        if not filters:
+            raise ValueError('suppression sans filtre refusée')
+        return self._call('DELETE', table, filters, None, prefer='return=minimal')

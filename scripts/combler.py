@@ -386,7 +386,7 @@ def from_web_search(ctx, minutes, limit):
     for a in pend:
         if time.time() - start > minutes * 60 or not models:
             break
-        ans = None
+        ans, busy = None, 0
         while models and ans is None:
             try:
                 ans, urls = gemini_search(key, models[0], a)
@@ -398,6 +398,15 @@ def from_web_search(ctx, minutes, limit):
                         time.sleep(60)
                         continue
                     print(f'  recherche web : quota épuisé pour {models[0].split("/")[-1]} ({why})')
+                elif e.code in (500, 502, 503, 504):
+                    busy += 1
+                    if busy > 3 * len(models):
+                        print('  recherche web : Gemini durablement surchargé, reprise au prochain passage')
+                        models.clear()
+                        break
+                    models.append(models.pop(0))     # surcharge passagère : on alterne entre les modèles
+                    time.sleep(20)
+                    continue
                 else:
                     print(f'  recherche web : {models[0].split("/")[-1]} refuse la recherche (erreur {e.code} : {body[:200]!r})')
                 models.pop(0)       # modèle suivant (les quotas gratuits sont propres à chaque modèle)

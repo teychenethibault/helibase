@@ -193,6 +193,9 @@ Réponds UNIQUEMENT en JSON, sous la forme :
 "registrations": ["<immatriculations des appareils citées dans l'article, ex. D-HDRA, G-NHAC ; liste vide sinon>"],
 "confidence": "high|medium|low"}]}
 Liste des activités : """ + ', '.join(ACTIVITIES) + """.
+Un événement = un seul exploitant final, désigné par son nom officiel (pas de « A / B ») ; si deux exploitants
+sont concernés, fais deux événements. Pour une armée ou un ministère de la Défense, mets le secteur "militaire".
+Livraisons : uniquement des appareils NEUFS sortis d'usine (ignore occasion, revente, location d'un appareil existant).
 N'invente rien : si une information n'est pas dans l'article, mets null. Aucun événement → {"events": []}.
 
 ARTICLES :
@@ -219,8 +222,8 @@ def ask_gemini(key, model, articles, log=print):
                     log(f'    quota épuisé pour {model.split("/")[-1]} ({why})')
                     return 'quota'
             if e.code in (500, 502, 503, 504) and attempt >= 1:
-                log(f'    {model.split("/")[-1]} surchargé ({e.code} — {quota_reason(e.read())[1][:120]}) : modèle suivant')
-                return 'quota'
+                log(f'    {model.split("/")[-1]} momentanément surchargé ({e.code}) : essai avec un autre modèle')
+                return 'busy'
             if e.code in (429, 500, 502, 503, 504) and attempt < 3:
                 wait = 20
                 log(f'    Gemini occupé ({e.code}), nouvel essai dans {wait} s')
@@ -242,6 +245,47 @@ def ask_gemini(key, model, articles, log=print):
 
 
 # ---------------------------------------------------------------------------
+MILITARY = re.compile(r'arm(ed|ée|ee)s?\b|armée|army|air force|navy|marine nationale|luftwaffe|bundeswehr|heer\b|'
+                      r'défense|defen[cs]e|minist(ry|ère|ere|erio|erium) (of |de la |della |der )?(def|vert)|'
+                      r'\bdga\b|armement|procurement agency|forces aériennes|aviation légère de l|alat\b|'
+                      r'esercito|ejército|ejercito|armada|força aérea|forca aerea|krijgsmacht|landmacht|luchtmacht|'
+                      r'försvar|forsvar|puolustus|wojsk|siły zbrojne|ozbrojen|honvéd|military', re.I)
+
+
+def canonical_name(name, country, sector):
+    """Un seul exploitant par armée : « Forces armées — pays », comme pour les livraisons Rotorspot."""
+    if sector == 'militaire' or MILITARY.search(name or ''):
+        return f'Forces armées — {country_name(country)}', 'militaire'
+    return name, sector
+
+
+def merge_military(store):
+    """Regroupe sous « Forces armées — pays » les exploitants militaires nommés autrement par la presse."""
+    ops = store.select('operators', 'id,name,country,sector')
+    notes = {n['operator_id'] for n in store.select('notes', 'operator_id')}
+    favs = {f['operator_id'] for f in store.select('favorites', 'operator_id')}
+    canon = {o['country']: o for o in ops if o['name'].startswith('Forces armées — ')}
+    moved = 0
+    for o in ops:
+        if o['name'].startswith('Forces armées — ') or not o.get('country') or o['id'] in notes or o['id'] in favs:
+            continue
+        if not (o.get('sector') == 'militaire' or MILITARY.search(o['name'])):
+            continue
+        target = canon.get(o['country'])
+        if not target:
+            target = store.insert('operators', [{'name': f'Forces armées — {country_name(o["country"])}', 'country': o['country'],
+                                                 'sector': 'militaire', 'activities': ['Militaire'],
+                                                 'lat': EUROPE[o['country']][1] if o['country'] in EUROPE else None,
+                                                 'lon': EUROPE[o['country']][2] if o['country'] in EUROPE else None}])[0]
+            canon[o['country']] = target
+        for t in ('orders', 'assignments'):
+            store.update(t, {'operator_id': target['id']}, operator_id=f'eq.{o["id"]}')
+        store.delete('operators', id=f'eq.{o["id"]}')
+        moved += 1
+    if moved:
+        print(f'{moved} exploitant(s) militaire(s) regroupé(s) sous « Forces armées — pays »')
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--dry-run', action='store_true')
@@ -260,6 +304,11 @@ def main():
     done = set()
     if store:
         done = {r['key'] for r in store.select('source_cache', 'key', key='like.press:*')}
+    if store:
+        try:
+            merge_military(store)
+        except Exception as e:
+            print(f'Regroupement des exploitants militaires impossible ({e})')
     backfill = not done
     if backfill:
         print(f'Premier passage : rattrapage des articles depuis {SINCE}')
@@ -292,12 +341,18 @@ def main():
         events, failed = [], set()
         for i in range(0, len(todo), args.batch):
             chunk = todo[i:i + args.batch]
-            res = 'quota'
-            while res == 'quota' and models:
+            res, busy_rounds = 'busy', 0
+            while res in ('busy', 'quota') and models and busy_rounds < 3 * len(models):
                 res = ask_gemini(key, models[0], chunk)
                 if res == 'quota':
-                    models.pop(0)       # quotas gratuits propres à chaque modèle : on passe au suivant
-            if res == 'quota' or res is None:
+                    models.pop(0)       # quota du jour épuisé pour ce modèle : abandonné pour ce passage
+                elif res == 'busy':
+                    models.append(models.pop(0))     # surcharge passagère : on alterne entre les modèles
+                    busy_rounds += 1
+                    if busy_rounds % len(models) == 0:
+                        print('    tous les modèles sont chargés : pause d\'une minute')
+                        time.sleep(60)
+            if res in ('busy', 'quota') or res is None:
                 failed.update(x['key'] for x in chunk)
                 res = []
             for e in res:
@@ -345,6 +400,8 @@ def main():
             art = e['_article']
             undisclosed = bool(e.get('undisclosed')) or not e.get('operator')
             name = f'Client non divulgué — {country_name(e["country"])}' if undisclosed else e['operator'].strip()
+            if not undisclosed:
+                name, e['sector'] = canonical_name(name, e['country'], e.get('sector'))
             k = (name_key(name), e['country'])
             op = by_key.get(k)
             if not op:
