@@ -174,7 +174,7 @@ def _assign(store, keep, heli_id, op_by_key, operators, open_assign, known_helis
         current = open_assign.get(hid)
         same = current and (
             (op and current['operator_id'] == op['id']) or
-            (not op and (current.get('owner_name') or '').upper() == owner.upper()))
+            (not op and not current.get('operator_id') and name_key(current.get('owner_name') or '') == name_key(owner)))
         if same:
             if r.get('registration') and current.get('registration') != r['registration']:
                 store.update('assignments', {'registration': r['registration']}, id=f'eq.{current["id"]}')
