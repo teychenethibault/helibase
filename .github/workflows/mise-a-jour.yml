@@ -23,14 +23,14 @@ jobs:
       - name: Registre américain (FAA)
         run: python scripts/import_faa.py
       - name: Autres registres et base mondiale
-        if: always()
+        if: ${{ !cancelled() }}
         run: python scripts/import_registres.py
       - name: Veille presse (livraisons et commandes)
-        if: always()
+        if: ${{ !cancelled() }}
         run: python scripts/veille_presse.py
       - name: Traitement automatique des annonces
-        if: always()
+        if: ${{ !cancelled() }}
         run: python scripts/traiter_file.py
       - name: Informations sur les exploitants (présentation, coordonnées, photo)
-        if: always()
+        if: ${{ !cancelled() }}
         run: python scripts/enrichir.py --minutes 120
