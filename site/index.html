@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Helibase</title>
+  <meta name="description" content="Exploitants d'hélicoptères Airbus livrés depuis 2024">
+  <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+  <meta name="robots" content="noindex, nofollow">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/svg+xml" href="/icons/logo.svg">
+  <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Helibase">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#/">
+        <img src="/icons/logo.svg" alt="" width="28" height="28">
+        <span>Helibase</span>
+      </a>
+      <nav class="topnav" id="topnav" hidden>
+        <a href="#/" data-nav="liste">Exploitants</a>
+        <a href="#/admin" data-nav="admin" id="nav-admin" hidden>Administration</a>
+      </nav>
+      <div class="topbar-actions">
+        <button class="pill-btn accent" id="btn-install" hidden title="Installer Helibase comme une application">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M12 3a1 1 0 0 1 1 1v9.6l3.3-3.3a1 1 0 1 1 1.4 1.4l-5 5a1 1 0 0 1-1.4 0l-5-5a1 1 0 1 1 1.4-1.4l3.3 3.3V4a1 1 0 0 1 1-1zM5 19h14a1 1 0 1 1 0 2H5a1 1 0 1 1 0-2z"/></svg>
+          <span>Installer l'app</span>
+        </button>
+        <span class="avatar" id="user-chip" hidden></span>
+        <button class="link-btn" id="btn-logout" hidden>Déconnexion</button>
+      </div>
+    </div>
+  </header>
+
+  <main id="app" aria-live="polite">
+    <p class="muted center pad">Chargement…</p>
+  </main>
+
+  <dialog id="install-dialog">
+    <img src="/icons/logo.svg" alt="" width="56" height="56">
+    <h2>Installer Helibase</h2>
+    <div id="install-steps"></div>
+    <form method="dialog"><button class="pill-btn accent wide">Compris</button></form>
+  </dialog>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
