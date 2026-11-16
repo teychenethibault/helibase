@@ -19,7 +19,7 @@ import time
 import urllib.parse
 import urllib.request
 
-from .models import map_model
+from .models import map_any
 from .store import SupabaseError
 from .names import infer_activities, is_financial, is_stock, name_key, pretty_name
 
@@ -46,8 +46,8 @@ def geocode(city, region, country):
 
 
 def ingest(store, records, source_label, source_url, source_kind='registre', since='2024-01-01',
-           do_geocode=True, log=print):
-    stats = {'lus': 0, 'airbus': 0, 'hors_periode': 0, 'stock': 0,
+           do_geocode=True, log=print, confidence=4):
+    stats = {'lus': 0, 'airbus': 0, 'hors_periode': 0, 'stock': 0, 'sans_exploitant': 0,
              'nouvelles_affectations': 0, 'reventes': 0, 'inchanges': 0, 'nouveaux_exploitants': 0,
              'a_verifier': 0, 'geocodes': 0}
 
@@ -55,13 +55,16 @@ def ingest(store, records, source_label, source_url, source_kind='registre', sin
     keep = []
     for r in records:
         stats['lus'] += 1
-        mapped = map_model(r.get('manufacturer'), r.get('registry_model'), r.get('year_built'))
-        if not mapped or not r.get('msn'):
+        mapped = map_any(r.get('manufacturer'), r.get('registry_model'), r.get('year_built'), r.get('typecode'))
+        if not mapped or not str(r.get('msn') or '').strip():
             continue
         stats['airbus'] += 1
         year = _int(r.get('year_built'))
         if (r.get('registered_on') or '') < since and (year or 0) < int(since[:4]):
             stats['hors_periode'] += 1
+            continue
+        if not (r.get('owner') or '').strip():
+            stats['sans_exploitant'] += 1
             continue
         if is_stock(r.get('owner')):
             stats['stock'] += 1
@@ -71,13 +74,14 @@ def ingest(store, records, source_label, source_url, source_kind='registre', sin
         keep.append(r)
     keep.sort(key=lambda r: r.get('registered_on') or '')
     log(f'{stats["airbus"]} hélicoptères Airbus dans le registre, {len(keep)} à intégrer '
-        f'({stats["hors_periode"]} hors période, {stats["stock"]} encore chez le constructeur ou un aménageur)')
+        f'({stats["hors_periode"]} hors période, {stats["stock"]} encore chez le constructeur ou un aménageur, '
+        f'{stats["sans_exploitant"]} sans exploitant connu)')
     if not keep:
         return stats
 
     # 2. Source de cette mise à jour
     source = store.insert('sources', [{'kind': source_kind, 'label': source_label, 'url': source_url,
-                                       'retrieved_on': dt.date.today().isoformat(), 'confidence': 4}])[0]
+                                       'retrieved_on': dt.date.today().isoformat(), 'confidence': confidence}])[0]
 
     # 3. Hélicoptères : création ou mise à jour (clé famille + numéro de série)
     helis = store.insert('helicopters', [
@@ -100,7 +104,7 @@ def ingest(store, records, source_label, source_url, source_kind='registre', sin
         open_assign[a['helicopter_id']] = a
     known_helis = {a['helicopter_id'] for a in store.select('assignments', 'helicopter_id')}
 
-    new_assignments, queue = [], []
+    new_assignments, queue, touched = [], [], set()
     for r in keep:
         hid = heli_id[(r['family'], r['msn'])]
         owner = (r.get('owner') or '').strip()
@@ -125,10 +129,13 @@ def ingest(store, records, source_label, source_url, source_kind='registre', sin
                         raise
                     op = found[0]
                 op['_region'] = r.get('region')
+                op['_new'] = True
                 op_by_key[key] = op
                 operators.append(op)
                 stats['nouveaux_exploitants'] += 1
 
+        if op:
+            touched.add(op['id'])
         current = open_assign.get(hid)
         same = current and (
             (op and current['operator_id'] == op['id']) or
@@ -170,11 +177,16 @@ def ingest(store, records, source_label, source_url, source_kind='registre', sin
     # 6. Géolocalisation des exploitants sans position
     if do_geocode:
         for o in operators:
-            if o.get('lat') is None and (o.get('city') or o.get('_region')):
+            if o.get('lat') is not None or o['id'] not in touched:
+                continue
+            pos = None
+            if o.get('city') or o.get('_region'):
                 pos = geocode(o.get('city'), o.get('_region'), o.get('country'))
-                if pos:
-                    store.update('operators', {'lat': pos[0], 'lon': pos[1]}, id=f'eq.{o["id"]}')
-                    stats['geocodes'] += 1
+            elif o.get('_new'):   # pas de ville dans la source : on cherche l'exploitant par son nom
+                pos = geocode(o.get('name'), None, o.get('country'))
+            if pos:
+                store.update('operators', {'lat': pos[0], 'lon': pos[1]}, id=f'eq.{o["id"]}')
+                stats['geocodes'] += 1
 
     store.insert('update_log', [{'source': source_label, 'added': stats['nouvelles_affectations'],
                                  'changed': stats['reventes'], 'queued': stats['a_verifier']}])

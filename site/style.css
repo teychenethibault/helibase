@@ -323,3 +323,25 @@ dialog li::before {
   .search { max-width: none; flex-basis: 100%; }
   .explorer.only-list .cards { grid-template-columns: 1fr; }
 }
+
+/* Fiche exploitant : photo, présentation, coordonnées, flotte repliable */
+.op-photo { margin: 0 0 1rem; border-radius: var(--r); overflow: hidden; position: relative; background: var(--surface-2, #e8e8ed); box-shadow: var(--shadow); }
+.op-photo img { display: block; width: 100%; height: clamp(180px, 32vw, 340px); object-fit: cover; }
+.op-photo figcaption { position: absolute; right: .6rem; bottom: .5rem; font-size: .7rem; color: #fff; background: rgba(0,0,0,.45); padding: .15rem .5rem; border-radius: 999px; backdrop-filter: blur(6px); }
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: .75rem; margin-bottom: .6rem; }
+.panel-head h2 { margin-bottom: 0; }
+.panel-head .pill-btn { padding: .3rem .8rem; font-size: .8rem; }
+.about { line-height: 1.55; margin: 0 0 .5rem; }
+.contact { display: grid; gap: .55rem; }
+.contact-row { display: grid; grid-template-columns: 7.5rem 1fr; gap: .75rem; align-items: baseline; }
+.contact-label { color: var(--text-2); font-size: .82rem; }
+.contact-row a, .contact-row span:last-child { overflow-wrap: anywhere; }
+details.fleet > summary { list-style: none; cursor: pointer; display: flex; align-items: baseline; gap: .75rem; }
+details.fleet > summary::-webkit-details-marker { display: none; }
+details.fleet > summary h2 { margin-bottom: 0; }
+details.fleet > summary .chevron { margin-left: auto; font-size: 1.4rem; line-height: 1; color: var(--text-2); transition: transform .2s; }
+details.fleet[open] > summary .chevron { transform: rotate(90deg); }
+details.fleet[open] > summary { margin-bottom: .9rem; }
+dialog.sheet { max-width: 560px; text-align: left; }
+dialog.sheet h2 { margin-top: 0; }
+@media (max-width: 640px) { .contact-row { grid-template-columns: 1fr; gap: .1rem; } }

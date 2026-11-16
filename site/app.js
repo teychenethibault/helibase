@@ -543,14 +543,18 @@ async function renderOperator(id) {
   const inService = fleet.filter((a) => !a.end_date);
   const pending = orders.filter((c) => c.status !== 'livree').reduce((n, c) => n + (c.quantity || 0), 0);
 
+  const photo = o.photo_url ? h('figure', { class: 'op-photo' },
+    h('img', { src: o.photo_url, alt: o.name, loading: 'lazy', referrerpolicy: 'no-referrer',
+      onerror: (e) => e.target.closest('figure').remove() }),
+    o.photo_credit ? h('figcaption', {}, 'Photo : ' + o.photo_credit) : null) : null;
+
   const hero = h('section', { class: 'hero' },
     starButton(o.id),
     monogram(o.name),
     h('div', {},
       h('h1', {}, o.name),
       h('div', { class: 'where' }, [o.city, countryName(o.country)].filter(Boolean).join(', ') || 'Localisation inconnue',
-        ' · ', SECTORS[o.sector] || '',
-        o.website ? [' · ', h('a', { href: o.website, target: '_blank', rel: 'noopener' }, 'Site web ↗')] : null),
+        ' · ', SECTORS[o.sector] || ''),
       (o.aliases || []).length ? h('div', { class: 'small muted' }, 'Aussi connu sous : ' + o.aliases.join(', ')) : null,
       (o.activities || []).length ? h('div', { class: 'tags' }, o.activities.map((a) => h('span', { class: 'tag' }, a))) : null));
 
@@ -562,6 +566,33 @@ async function renderOperator(id) {
     tile('Commandes en cours', String(pending), pending > 1 ? 'appareils' : 'appareil'),
     tile('Notes', String((notesRes.data || []).length)));
 
+  // Présentation de la société
+  const host = (url) => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url; } };
+  const aboutPanel = h('section', { class: 'panel' },
+    h('div', { class: 'panel-head' }, h('h2', {}, 'La société'),
+      h('button', { class: 'pill-btn', type: 'button', onclick: () => editOperatorInfo(o) }, 'Modifier')),
+    o.summary ? h('p', { class: 'about' }, o.summary)
+      : h('p', { class: 'muted small' }, 'Aucune présentation trouvée automatiquement. Cliquez sur « Modifier » pour en ajouter une.'),
+    o.summary_source ? h('p', { class: 'small muted' }, 'Source : ',
+      h('a', { href: o.summary_source, target: '_blank', rel: 'noopener' }, host(o.summary_source))) : null);
+
+  // Coordonnées
+  const line = (label, value, href) => value ? h('div', { class: 'contact-row' },
+    h('span', { class: 'contact-label' }, label),
+    href ? h('a', { href, target: href.startsWith('http') ? '_blank' : null, rel: 'noopener' }, value) : h('span', {}, value)) : null;
+  const contactRows = [
+    line('Adresse', o.address || [o.city, countryName(o.country)].filter(Boolean).join(', ')),
+    line('Téléphone', o.phone, o.phone ? 'tel:' + o.phone.replace(/[^+\d]/g, '') : null),
+    line('E-mail', o.email, o.email ? 'mailto:' + o.email : null),
+    line('Site web', o.website ? host(o.website) : null, o.website),
+  ].filter(Boolean);
+  const contactPanel = h('section', { class: 'panel' },
+    h('div', { class: 'panel-head' }, h('h2', {}, 'Coordonnées'),
+      h('button', { class: 'pill-btn', type: 'button', onclick: () => editOperatorInfo(o) }, 'Modifier')),
+    contactRows.length ? h('div', { class: 'contact' }, contactRows) : h('p', { class: 'muted small' }, 'Aucune coordonnée connue.'),
+    o.info_edited_at ? h('p', { class: 'small muted' }, 'Complété à la main le ' + fmtDate(o.info_edited_at)) : null);
+
+  // Flotte : repliée, visible au clic
   const fleetTable = fleet.length
     ? h('table', {},
         h('thead', {}, h('tr', {}, ['Modèle', 'N° de série', 'Immat.', 'Date', '', 'Source'].map((t) => h('th', {}, t)))),
@@ -574,6 +605,12 @@ async function renderOperator(id) {
             a.end_date ? h('div', { class: 'small muted' }, 'parti le ' + fmtDate(a.end_date)) : null),
           h('td', { class: 'small' }, a.sources?.url ? h('a', { href: a.sources.url, target: '_blank', rel: 'noopener' }, a.sources.label) : (a.sources?.label || ''))))))
     : h('p', { class: 'muted' }, 'Aucun appareil enregistré.');
+  const models = [...new Set(inService.map((a) => a.helicopters?.model).filter(Boolean))];
+  const fleetPanel = h('details', { class: 'panel fleet' },
+    h('summary', {}, h('h2', {}, 'Flotte Airbus'),
+      h('span', { class: 'muted small' }, plural(inService.length, 'appareil') + (models.length ? ' · ' + models.join(', ') : '')),
+      h('span', { class: 'chevron', 'aria-hidden': 'true' }, '›')),
+    fleetTable);
 
   const ordersPanel = orders.length ? h('section', { class: 'panel' }, h('h2', {}, 'Livraisons à venir'),
     h('table', {}, h('tbody', {}, orders.map((c) => h('tr', {},
@@ -587,11 +624,43 @@ async function renderOperator(id) {
 
   render(
     h('a', { class: 'back', href: '#/' }, '‹ Exploitants'),
-    hero, tiles,
+    photo, hero, tiles,
     h('div', { class: 'grid-2' },
-      h('div', {}, h('section', { class: 'panel' }, h('h2', {}, 'Flotte Airbus'), fleetTable), ordersPanel),
+      h('div', {}, aboutPanel, contactPanel, fleetPanel, ordersPanel),
       h('div', {}, notesPanel(o.id, notesRes.data || []), locPanel)));
   miniMap(mapBox, o, bases);
+}
+
+function editOperatorInfo(o) {
+  const field = (name, label, value, type = 'text', multiline = false) => h('label', { class: 'field' },
+    h('span', {}, label),
+    multiline ? h('textarea', { name, rows: 5 }, value || '') : h('input', { name, type, value: value || '' }));
+  const dlg = h('dialog', { class: 'sheet' });
+  const form = h('form', { class: 'account-form', onsubmit: async (e) => {
+    e.preventDefault();
+    const data = Object.fromEntries(new FormData(form).entries());
+    const info = {};
+    for (const [k, v] of Object.entries(data)) if ((v || '') !== (o[k] || '')) info[k] = v;
+    if (!Object.keys(info).length) { dlg.close(); return; }
+    const { error } = await supabase.rpc('update_operator_info', { target: o.id, info });
+    if (error) { alert('Enregistrement impossible : ' + error.message); return; }
+    dlg.close();
+    renderOperator(o.id);
+  } },
+    h('h2', {}, o.name),
+    field('summary', 'Présentation de la société', o.summary, 'text', true),
+    field('address', 'Adresse', o.address),
+    field('phone', 'Téléphone', o.phone, 'tel'),
+    field('email', 'E-mail', o.email, 'email'),
+    field('website', 'Site web', o.website, 'url'),
+    field('photo_url', 'Adresse d\'une photo (lien vers une image)', o.photo_url, 'url'),
+    h('div', { class: 'dialog-actions' },
+      h('button', { class: 'pill-btn', type: 'button', onclick: () => dlg.close() }, 'Annuler'),
+      h('button', { class: 'pill-btn accent', type: 'submit' }, 'Enregistrer')));
+  dlg.append(form);
+  dlg.addEventListener('close', () => dlg.remove());
+  document.body.append(dlg);
+  dlg.showModal();
 }
 
 function notesPanel(operatorId, notes) {

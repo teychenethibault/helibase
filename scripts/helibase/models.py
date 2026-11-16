@@ -55,7 +55,7 @@ def map_model(manufacturer, model, year_built=None):
     if 'BK117' in m or m.startswith(('H145', 'EC145')):
         if 'D3' in m or m.startswith('H145D3'):
             return 'BK117', 'H145 D3'
-        if 'D2' in m or m.startswith('H145'):
+        if 'D2' in m or m.startswith('H145') or 'EC145T2' in m:
             return 'BK117', 'H145'
         if 'C2' in m or m.startswith('EC145'):
             return 'BK117', 'EC145'
@@ -90,4 +90,27 @@ def map_model(manufacturer, model, year_built=None):
         return 'Alouette', 'Alouette III'
     if m.startswith(('SA315', 'SA318', 'SE3130', 'SE313')):
         return 'Alouette', 'Alouette / Lama'
+    return None
+
+
+# Codes de type OACI (utilisés par les bases de transpondeurs) → modèle générique
+TYPECODES = {
+    'EC20': 'EC120', 'AS50': 'AS350B3', 'AS55': 'AS355', 'EC30': 'EC130', 'EC35': 'EC135',
+    'EC45': 'EC145', 'BK17': 'BK117', 'H160': 'H160', 'EC55': 'EC155', 'AS65': 'AS365',
+    'EC75': 'H175', 'EC25': 'EC225', 'AS32': 'AS332', 'H140': 'H140', 'B105': 'BO105',
+    'GAZL': 'SA341', 'ALO3': 'SA316', 'ALO2': 'SA315', 'LAMA': 'SA315', 'PUMA': 'SA330',
+}
+
+
+def map_any(manufacturer, model, year_built=None, typecode=None):
+    """Comme map_model, avec repli sur le code OACI quand la désignation est absente ou inconnue."""
+    found = map_model(manufacturer, model, year_built)
+    if found:
+        return found
+    generic = TYPECODES.get((typecode or '').strip().upper())
+    if generic:
+        y = _year(year_built) or 0
+        if generic == 'EC145':
+            return 'BK117', 'H145' if y >= 2014 else 'EC145'
+        return map_model('AIRBUS', generic, year_built)
     return None
