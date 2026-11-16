@@ -171,8 +171,10 @@ def main():
 
     from helibase.store import Store
     store = Store()
-    cols = 'id,name,country,city,lat,lon,wikidata_id,enriched_at,info_edited_at,' + ','.join(FIELDS)
-    ops = store.select('operators', cols)
+    cols = 'id,name,country,city,lat,lon,wikidata_id,enriched_at,info_edited_at,is_placeholder,sector,' + ','.join(FIELDS)
+    # Les regroupements « à identifier » et les forces armées n'ont pas de fiche société à chercher
+    ops = [o for o in store.select('operators', cols)
+           if not o.get('is_placeholder') and not o['name'].startswith('Forces armées')]
     limit_date = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=REVIEW_DAYS)).isoformat()
     todo = [o for o in ops if not o.get('enriched_at') or o['enriched_at'] < limit_date]
     if args.name:

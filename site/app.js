@@ -17,13 +17,23 @@ const ACTIVITIES = [
   'Formation', 'Militaire',
 ];
 const SECTORS = { civil: 'Civil', etatique: 'Étatique', militaire: 'Militaire' };
+// Europe (UE, Royaume-Uni, Suisse, Norvège, Islande, Balkans, Ukraine, Turquie) : la carte ne sort pas de cette zone
+const EUROPE_BOUNDS = [[-25, 34], [45, 71.5]];
+const EUROPE_MAX = [[-45, 22], [65, 78]];
+const EMPTY_FILTERS = () => ({ q: '', country: '', model: '', activity: '', period: '', favOnly: false, sector: 'all' });
+function fmtDelivery(date, precision) {
+  if (!date) return '';
+  if (precision === 'annee_estimee') return date.slice(0, 4) + ' (estimé)';
+  if (precision === 'mois') return new Date(date).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
+  return fmtDate(date);
+}
 
 const state = {
   session: null,
   profile: null,
   operators: [],
   favorites: new Set(),
-  filters: { q: '', country: '', model: '', activity: '', period: '', favOnly: false },
+  filters: { q: '', country: '', model: '', activity: '', period: '', favOnly: false, sector: 'all' },
   view: 'both',        // 'both' | 'list' | 'map'
   syncMap: true,       // la liste suit la zone visible de la carte
   bounds: null,
@@ -129,7 +139,7 @@ function renderLogin(message, mode = 'login') {
   render(h('section', { class: 'login' },
     h('img', { class: 'app-icon', src: '/icons/logo.svg', alt: '' }),
     h('h1', {}, 'Helibase'),
-    h('p', { class: 'lead' }, "Les exploitants d'hélicoptères Airbus, livraison après livraison."),
+    h('p', { class: 'lead' }, "Les hélicoptères Airbus neufs livrés en Europe depuis 2024, exploitant par exploitant."),
     seg,
     message ? errorBox(message) : null,
     form, status,
@@ -238,7 +248,7 @@ async function loadOperators() {
   if (ops.error) throw ops.error;
   if (favs.error) throw favs.error;
   // Par sécurité, un exploitant n'apparaît que s'il a au moins un appareil ou une livraison connue
-  state.operators = (ops.data || []).filter((o) => o.fleet_count > 0 || o.last_delivery_date || o.last_delivery_model);
+  state.operators = (ops.data || []).filter((o) => o.fleet_count > 0 || o.planned_count > 0 || o.last_delivery_date || o.last_delivery_model);
   state.favorites = new Set((favs.data || []).map((f) => f.operator_id));
 }
 
@@ -322,7 +332,7 @@ async function initExplorerMap(container, onMove) {
   }
   if (!container.isConnected) return;
   const map = new maplibregl.Map({
-    container, style: MAP_STYLE, center: [10, 28], zoom: 1.2,
+    container, style: MAP_STYLE, bounds: EUROPE_BOUNDS, maxBounds: EUROPE_MAX, minZoom: 2.3, renderWorldCopies: false,
     attributionControl: { compact: true }, dragRotate: false, pitchWithRotate: false,
   });
   state.map = map;
@@ -363,7 +373,7 @@ async function initExplorerMap(container, onMove) {
         .setDOMContent(h('div', {},
           h('strong', {}, o.name),
           h('div', { class: 'muted' }, [o.city, countryName(o.country)].filter(Boolean).join(', ')),
-          o.last_delivery_model ? h('div', { class: 'muted' }, 'Dernière livraison : ' + o.last_delivery_model + ' · ' + fmtDate(o.last_delivery_date)) : null,
+          o.last_delivery_model ? h('div', { class: 'muted' }, 'Dernière livraison : ' + o.last_delivery_model + ' · ' + fmtDelivery(o.last_delivery_date, o.last_delivery_precision)) : null,
           h('a', { href: '#/exploitant/' + o.id }, 'Voir la fiche →')))
         .addTo(map);
     });
@@ -377,6 +387,8 @@ async function initExplorerMap(container, onMove) {
       const b = new maplibregl.LngLatBounds();
       pts.forEach((o) => b.extend([o.lon, o.lat]));
       map.fitBounds(b, { padding: 60, maxZoom: 6, duration: 0 });
+    } else {
+      map.fitBounds(EUROPE_BOUNDS, { padding: 20, duration: 0 });
     }
     onMove();
   });
@@ -389,7 +401,8 @@ async function miniMap(container, o, bases) {
   let maplibregl;
   try { maplibregl = await loadMapLibre(); } catch (e) { container.append(h('div', { class: 'map-msg' }, e.message)); return; }
   if (!container.isConnected) return;
-  const map = new maplibregl.Map({ container, style: MAP_STYLE, center: [points[0].lon, points[0].lat], zoom: 6,
+  const map = new maplibregl.Map({ container, style: MAP_STYLE, center: [points[0].lon, points[0].lat], zoom: o.is_placeholder ? 4 : 6,
+    maxBounds: EUROPE_MAX, minZoom: 2.3, renderWorldCopies: false,
     attributionControl: { compact: true }, interactive: true, dragRotate: false });
   state.map = map;
   points.forEach((p, i) => new maplibregl.Marker({ color: i === 0 ? ACCENT : '#86868b' }).setLngLat([p.lon, p.lat]).addTo(map));
@@ -406,13 +419,15 @@ async function miniMap(container, o, bases) {
 function filteredOperators() {
   const f = state.filters;
   const q = f.q.trim().toLowerCase();
-  const minDate = f.period ? new Date(Date.now() - Number(f.period) * 30.44 * 864e5) : null;
   return state.operators.filter((o) => {
+    if (f.sector === 'militaire' && o.sector !== 'militaire') return false;
+    if (f.sector === 'civil' && o.sector === 'militaire') return false;
     if (f.favOnly && !state.favorites.has(o.id)) return false;
     if (f.country && o.country !== f.country) return false;
     if (f.model && !(o.models || []).includes(f.model)) return false;
     if (f.activity && !(o.activities || []).includes(f.activity)) return false;
-    if (minDate && (!o.last_delivery_date || new Date(o.last_delivery_date) < minDate)) return false;
+    if (f.period === 'prevu' && !(o.planned_count > 0)) return false;
+    if (/^\d{4}$/.test(f.period) && !(o.delivery_years || []).map(String).includes(f.period)) return false;
     if (q) {
       const hay = [o.name, ...(o.aliases || []), o.city, countryName(o.country)].join(' ').toLowerCase();
       if (!hay.includes(q)) return false;
@@ -423,7 +438,7 @@ function filteredOperators() {
 
 function operatorCard(o) {
   return h('article', {
-    class: 'card', tabindex: '0', 'data-id': o.id,
+    class: 'card' + (o.is_placeholder ? ' placeholder' : ''), tabindex: '0', 'data-id': o.id,
     onclick: () => { location.hash = '#/exploitant/' + o.id; },
     onkeydown: (e) => { if (e.key === 'Enter') location.hash = '#/exploitant/' + o.id; },
     onmouseenter: () => highlightOnMap(o),
@@ -435,19 +450,20 @@ function operatorCard(o) {
       h('div', {},
         h('h3', {}, o.name),
         h('div', { class: 'where' }, [o.city, countryName(o.country)].filter(Boolean).join(', ') || 'Localisation inconnue',
-          o.sector && o.sector !== 'civil' ? ' · ' + SECTORS[o.sector] : ''))),
+          o.sector && o.sector !== 'civil' ? ' · ' + SECTORS[o.sector] : ''),
+        o.is_placeholder ? h('span', { class: 'tag todo' }, 'Exploitant à identifier') : null)),
     h('div', { class: 'metrics' },
       h('div', { class: 'metric' },
         h('div', { class: 'eyebrow' }, 'Dernière livraison'),
         o.last_delivery_model
           ? h('div', { class: 'value' }, o.last_delivery_model,
-              h('small', {}, fmtDate(o.last_delivery_date)),
-              o.last_delivery_is_new === null || o.last_delivery_is_new === undefined ? null
-                : h('span', { class: 'tag ' + (o.last_delivery_is_new ? 'new' : 'used') }, o.last_delivery_is_new ? 'Neuf' : 'Occasion'))
+              h('small', {}, fmtDelivery(o.last_delivery_date, o.last_delivery_precision)))
           : h('div', { class: 'value' }, h('small', {}, '—'))),
       h('div', { class: 'metric' },
-        h('div', { class: 'eyebrow' }, 'Flotte Airbus'),
-        h('div', { class: 'value' }, String(o.fleet_count || 0), h('small', {}, (o.models || []).join(', '))))),
+        h('div', { class: 'eyebrow' }, 'Livrés depuis 2024'),
+        h('div', { class: 'value' }, String(o.fleet_count || 0),
+          o.planned_count ? h('span', { class: 'tag soon' }, '+' + o.planned_count + ' prévu' + (o.planned_count > 1 ? 's' : '')) : null,
+          h('small', {}, (o.models || []).join(', '))))),
     (o.activities || []).length ? h('div', { class: 'tags' }, o.activities.map((a) => h('span', { class: 'tag' }, a))) : null);
 }
 
@@ -490,12 +506,32 @@ function renderList() {
     updateMapData();
     refreshList();
     toolbar.querySelectorAll('.chip-select').forEach((c) => c.classList.toggle('set', !!c.querySelector('select').value));
+    const any = f.q || f.country || f.model || f.activity || f.period || f.favOnly || f.sector !== 'all';
+    clearBtn.classList.toggle('visible', !!any);
   }
 
   const chip = (key, label, options) => h('div', { class: 'chip-select' + (f[key] ? ' set' : '') },
     h('select', { 'aria-label': label, onchange: (e) => { f[key] = e.target.value; refreshAll(); } },
       h('option', { value: '' }, label),
       options.map(([v, t]) => h('option', { value: v, selected: f[key] === v }, t))));
+
+  const yearsOptions = () => {
+    const out = [];
+    for (let y = new Date().getFullYear(); y >= 2024; y--) out.push([String(y), 'Livré en ' + y]);
+    return out;
+  };
+  // Curseur Civil / Tous / Militaire (le civil comprend les aéronefs d'État : police, sécurité civile…)
+  const sectorSwitch = h('div', { class: 'sector-switch', role: 'radiogroup', 'aria-label': 'Domaine' });
+  const drawSector = () => {
+    sectorSwitch.dataset.pos = f.sector;
+    sectorSwitch.querySelectorAll('button').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.v === f.sector)));
+  };
+  sectorSwitch.append(h('span', { class: 'thumb', 'aria-hidden': 'true' }));
+  [['civil', 'Civil'], ['all', 'Tous'], ['militaire', 'Militaire']].forEach(([v, t]) => sectorSwitch.append(
+    h('button', { type: 'button', role: 'radio', 'data-v': v, onclick: () => { f.sector = v; drawSector(); refreshAll(); } }, t)));
+  drawSector();
+  const clearBtn = h('button', { class: 'clear-btn', type: 'button', title: 'Effacer tous les filtres',
+    onclick: () => { state.filters = EMPTY_FILTERS(); renderList(); } }, '✕ Effacer les filtres');
 
   const favChip = h('button', { class: 'toggle-chip' + (f.favOnly ? ' on' : ''), type: 'button',
     onclick: () => { f.favOnly = !f.favOnly; favChip.classList.toggle('on', f.favOnly); refreshAll(); } },
@@ -508,8 +544,8 @@ function renderList() {
     chip('country', 'Pays', countries.map((c) => [c, countryName(c)])),
     chip('model', 'Modèle', models.map((m) => [m, m])),
     chip('activity', 'Activité', ACTIVITIES.map((a) => [a, a])),
-    chip('period', 'Livré depuis', [['3', '3 mois'], ['6', '6 mois'], ['12', '1 an'], ['24', '2 ans']]),
-    favChip);
+    chip('period', 'Période', [...yearsOptions(), ['prevu', 'Livraison prévue']]),
+    favChip, sectorSwitch, clearBtn);
 
   const views = [['both', 'Liste et carte'], ['list', 'Liste'], ['map', 'Carte']];
   const seg = h('div', { class: 'segmented', role: 'tablist' });
@@ -525,10 +561,11 @@ function renderList() {
   render(
     h('div', { class: 'page-head' },
       h('div', {}, h('h1', {}, 'Exploitants'),
-        h('div', { class: 'sub' }, plural(state.operators.length, 'exploitant') + ' d\'hélicoptères Airbus')),
+        h('div', { class: 'sub' }, plural(state.operators.length, 'exploitant') + ' · hélicoptères Airbus neufs livrés en Europe depuis 2024')),
       seg),
     toolbar, explorer);
   applyView();
+  refreshAll();
   initExplorerMap(mapEl, () => { state.bounds = state.map?.getBounds?.() || null; refreshList(); });
 }
 
@@ -555,6 +592,8 @@ async function renderOperator(id) {
   const orders = ordersRes.data || [];
   const bases = basesRes.data || [];
   const inService = fleet.filter((a) => !a.end_date);
+  const delivered = inService.filter((a) => (a.status || 'livre') === 'livre');
+  const planned = inService.filter((a) => a.status === 'prevu');
   const pending = orders.filter((c) => c.status !== 'livree').reduce((n, c) => n + (c.quantity || 0), 0);
 
   const photo = o.photo_url ? h('figure', { class: 'op-photo' },
@@ -567,6 +606,7 @@ async function renderOperator(id) {
     monogram(o.name),
     h('div', {},
       h('h1', {}, o.name),
+      o.is_placeholder ? h('p', { class: 'small muted' }, 'Le nom de l\'exploitant n\'est pas encore publié dans une source fiable : les appareils sont regroupés ici par pays. Cliquez sur « Modifier » si vous le connaissez.') : null,
       h('div', { class: 'where' }, [o.city, countryName(o.country)].filter(Boolean).join(', ') || 'Localisation inconnue',
         ' · ', SECTORS[o.sector] || ''),
       (o.aliases || []).length ? h('div', { class: 'small muted' }, 'Aussi connu sous : ' + o.aliases.join(', ')) : null,
@@ -575,9 +615,9 @@ async function renderOperator(id) {
   const tile = (label, value, sub) => h('div', { class: 'tile' }, h('div', { class: 'eyebrow' }, label),
     h('div', { class: 'value' }, value, sub ? h('small', {}, ' ' + sub) : null));
   const tiles = h('div', { class: 'tiles' },
-    tile('Flotte en service', String(inService.length), inService.length > 1 ? 'appareils' : 'appareil'),
-    tile('Dernière livraison', o.last_delivery_model || '—', o.last_delivery_date ? fmtDate(o.last_delivery_date) : ''),
-    tile('Commandes en cours', String(pending), pending > 1 ? 'appareils' : 'appareil'),
+    tile('Livrés depuis 2024', String(delivered.length), delivered.length > 1 ? 'appareils' : 'appareil'),
+    tile('Livraisons prévues', String(planned.length + pending), planned.length + pending > 1 ? 'appareils' : 'appareil'),
+    tile('Dernière livraison', o.last_delivery_model || '—', fmtDelivery(o.last_delivery_date, o.last_delivery_precision)),
     tile('Notes', String((notesRes.data || []).length)));
 
   // Présentation de la société
@@ -609,20 +649,21 @@ async function renderOperator(id) {
   // Flotte : repliée, visible au clic
   const fleetTable = fleet.length
     ? h('table', {},
-        h('thead', {}, h('tr', {}, ['Modèle', 'N° de série', 'Immat.', 'Date', '', 'Source'].map((t) => h('th', {}, t)))),
+        h('thead', {}, h('tr', {}, ['Modèle', 'N° de série', 'Immat.', 'Livraison', '', 'Source'].map((t) => h('th', {}, t)))),
         h('tbody', {}, fleet.map((a) => h('tr', {},
-          h('td', {}, h('strong', {}, a.helicopters?.model || '')),
+          h('td', {}, h('strong', {}, a.helicopters?.model || ''),
+            a.helicopters?.variant ? h('div', { class: 'small muted' }, a.helicopters.variant) : null),
           h('td', {}, a.helicopters?.msn || ''),
           h('td', {}, a.registration || ''),
-          h('td', {}, a.start_date ? fmtDate(a.start_date) : h('span', { class: 'muted small' }, 'date inconnue')),
-          h('td', {}, a.is_new === null ? null : h('span', { class: 'tag ' + (a.is_new ? 'new' : 'used') }, a.is_new ? 'Neuf' : 'Occasion'),
+          h('td', {}, a.start_date ? fmtDelivery(a.start_date, a.date_precision) : h('span', { class: 'muted small' }, a.status === 'prevu' ? 'à venir' : 'date inconnue')),
+          h('td', {}, h('span', { class: 'tag ' + (a.status === 'prevu' ? 'soon' : 'new') }, a.status === 'prevu' ? 'Prévu' : 'Livré'),
             a.end_date ? h('div', { class: 'small muted' }, 'parti le ' + fmtDate(a.end_date)) : null),
           h('td', { class: 'small' }, a.sources?.url ? h('a', { href: a.sources.url, target: '_blank', rel: 'noopener' }, a.sources.label) : (a.sources?.label || ''))))))
     : h('p', { class: 'muted' }, 'Aucun appareil enregistré.');
   const models = [...new Set(inService.map((a) => a.helicopters?.model).filter(Boolean))];
   const fleetPanel = h('details', { class: 'panel fleet' },
     h('summary', {}, h('h2', {}, 'Flotte Airbus'),
-      h('span', { class: 'muted small' }, plural(inService.length, 'appareil') + (models.length ? ' · ' + models.join(', ') : '')),
+      h('span', { class: 'muted small' }, plural(delivered.length, 'livré') + (planned.length ? ', ' + planned.length + ' prévu' + (planned.length > 1 ? 's' : '') : '') + (models.length ? ' · ' + models.join(', ') : '')),
       h('span', { class: 'chevron', 'aria-hidden': 'true' }, '›')),
     fleetTable);
 
@@ -644,7 +685,8 @@ async function renderOperator(id) {
         h('td', { class: 'small' }, srcLink(c))))))) : null,
   ];
   const mapBox = h('div', { class: 'mini-map' });
-  const locPanel = h('section', { class: 'panel' }, h('h2', {}, 'Localisation'), mapBox,
+  const locPanel = h('section', { class: 'panel' }, h('h2', {}, 'Localisation'),
+    o.is_placeholder ? h('p', { class: 'small muted' }, 'Position approximative (centre du pays).') : null, mapBox,
     bases.length ? h('p', { class: 'small muted' }, 'Bases : ' + bases.map((b) => b.name).join(', ')) : null);
 
   render(
@@ -729,7 +771,7 @@ function notesPanel(operatorId, notes) {
 function adminTabs(active) {
   return h('div', { class: 'segmented admin-tabs' },
     h('a', { href: '#/admin', class: active === 'users' ? 'on' : null }, 'Utilisateurs'),
-    h('a', { href: '#/admin/verifier', class: active === 'review' ? 'on' : null }, 'À vérifier'));
+    null);
 }
 
 // ---------------------------------------------------------------------------
@@ -899,7 +941,7 @@ async function route() {
     a.classList.toggle('active', (a.dataset.nav === 'admin') === hash.startsWith('#/admin')));
   try {
     if (hash.startsWith('#/exploitant/')) await renderOperator(decodeURIComponent(hash.split('/')[2]));
-    else if (hash.startsWith('#/admin/verifier')) await renderReview();
+    else if (hash.startsWith('#/admin/verifier')) location.hash = '#/admin';
     else if (hash.startsWith('#/admin')) await renderAdmin();
     else { await loadOperators(); renderList(); }
   } catch (e) {
