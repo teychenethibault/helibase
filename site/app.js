@@ -237,7 +237,8 @@ async function loadOperators() {
   ]);
   if (ops.error) throw ops.error;
   if (favs.error) throw favs.error;
-  state.operators = ops.data || [];
+  // Par sécurité, un exploitant n'apparaît que s'il a au moins un appareil ou une livraison connue
+  state.operators = (ops.data || []).filter((o) => o.fleet_count > 0 || o.last_delivery_date || o.last_delivery_model);
   state.favorites = new Set((favs.data || []).map((f) => f.operator_id));
 }
 

@@ -272,8 +272,8 @@ OFFICIAL = {
     'france': ('FR', src_france),
     'suisse': ('CH', src_suisse),
     'bresil': ('BR', src_bresil),
-    'pays_bas': ('NL', src_pays_bas),
 }
+# Désactivés : Pays-Bas (le fichier officiel n'est plus publié), OpenSky (aucune donnée après 2019)
 # Registres sans date d'immatriculation : toute la flotte actuelle est intégrée
 ALL_YEARS = {'france'}
 
@@ -321,7 +321,7 @@ def main():
             continue
         if run(name, fn, 4):
             OFFICIAL_DONE.add(country)
-    if not only or 'opensky' in only:
+    if only and 'opensky' in only:   # seulement à la demande : base figée depuis 2019 environ
         run('opensky', src_opensky, 2)
 
     print('\nSources en échec : ' + (', '.join(failures) if failures else 'aucune'))

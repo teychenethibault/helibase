@@ -170,7 +170,7 @@ def norm(text):
 FIELDS = {
     'registration': (['mark', 'registration', 'registrationmark', 'regmark', 'reg', 'immatriculation',
                       'kjennemerke', 'registreringsmerke', 'tunnus', 'rekisteritunnus', 'registreringsnummer',
-                      'nationalitymark', 'marca', 'registratie', 'inschrijvingskenmerk'],
+                      'nationalitymark', 'marca', 'marcas', 'registratie', 'inschrijvingskenmerk'],
                      ['registrationmark', 'inschrijvingskenmerk', 'kjennemerke', 'rekisteritunnus', 'immatric', 'registration']),
     'manufacturer': (['manu', 'manufacturer', 'make', 'mfr', 'produsent', 'fabrikant', 'valmistaja',
                       'manufacturername', 'constructeur', 'tilvirker', 'nmfabricante', 'fabricante'],

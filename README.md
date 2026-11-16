@@ -15,3 +15,6 @@ Secrets GitHub nécessaires (Settings → Secrets and variables → Actions) :
 - `supabase/04_fiche_exploitant.sql` : colonnes de la fiche exploitant (à exécuter une fois).
 - `supabase/05_corrections.sql` : corrections après le premier import (à exécuter une fois).
 - `scripts/veille_presse.py` : veille de la presse mondiale (Google Actualités, 6 langues) → Administration › À vérifier.
+- `scripts/traiter_file.py` : validation automatique des annonces de presse (doublons fusionnés, pays retrouvé, fiches créées).
+- `supabase/06_nettoyage.sql` : nettoyage des erreurs des premiers imports (à exécuter une fois).
+- `scripts/helibase/verify.py` : contrôles de fiabilité (même nom, même pays, activité aéronautique, position cohérente).

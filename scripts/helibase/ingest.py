@@ -21,6 +21,7 @@ import urllib.request
 
 from .models import map_any
 from .store import SupabaseError
+from .verify import geocode_city
 from .names import infer_activities, is_financial, is_stock, name_key, pretty_name
 
 GEOCODER = 'https://nominatim.openstreetmap.org/search'
@@ -117,8 +118,29 @@ def ingest(store, records, source_label, source_url, source_kind='registre', sin
     known_helis = {a['helicopter_id'] for a in store.select('assignments', 'helicopter_id')}
 
     new_assignments, queue, touched = [], [], set()
+    try:
+        _assign(store, keep, heli_id, op_by_key, operators, open_assign, known_helis, source, stats,
+                new_assignments, queue, touched, all_years, first_import, today)
+    finally:
+        # Ce qui a été préparé est toujours enregistré : pas d'exploitant sans appareil si l'import s'interrompt
+        if new_assignments:
+            store.insert('assignments', new_assignments)
+        if queue:
+            store.insert('review_queue', queue)
+        stats['nouvelles_affectations'] = len(new_assignments)
+        stats['a_verifier'] = len(queue)
+    _finish(store, operators, touched, stats, source_label, do_geocode, log)
+    return stats
+
+
+def _assign(store, keep, heli_id, op_by_key, operators, open_assign, known_helis, source, stats,
+            new_assignments, queue, touched, all_years, first_import, today):
     for r in keep:
         hid = heli_id[(r['family'], r['msn'])]
+        if hid in open_assign and open_assign[hid].get('id') is None:
+            # Même appareil deux fois dans le fichier (ré-immatriculation, copropriété) : on garde la première ligne
+            stats['inchanges'] += 1
+            continue
         owner = (r.get('owner') or '').strip()
         financial = is_financial(owner)
         op = None
@@ -187,23 +209,15 @@ def ingest(store, records, source_label, source_url, source_kind='registre', sin
                                       'owner': owner, 'city': r.get('city'), 'region': r.get('region'),
                                       'country': r.get('country')}})
 
-    if new_assignments:
-        store.insert('assignments', new_assignments)
-    if queue:
-        store.insert('review_queue', queue)
-    stats['nouvelles_affectations'] = len(new_assignments)
-    stats['a_verifier'] = len(queue)
 
+
+def _finish(store, operators, touched, stats, source_label, do_geocode, log):
     # 6. Géolocalisation des exploitants sans position
     if do_geocode:
         for o in operators:
             if o.get('lat') is not None or o['id'] not in touched:
                 continue
-            pos = None
-            if o.get('city') or o.get('_region'):
-                pos = geocode(o.get('city'), o.get('_region'), o.get('country'))
-            elif o.get('_new'):   # pas de ville dans la source : on cherche l'exploitant par son nom
-                pos = geocode(o.get('name'), None, o.get('country'))
+            pos = geocode_city(o.get('city'), o.get('_region'), o.get('country')) if (o.get('city') or o.get('_region')) else None
             if pos:
                 store.update('operators', {'lat': pos[0], 'lon': pos[1]}, id=f'eq.{o["id"]}')
                 stats['geocodes'] += 1
