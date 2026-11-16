@@ -1,34 +1,29 @@
 name: Mise à jour hebdomadaire
-
 on:
   schedule:
     - cron: '7 5 * * 1'
   workflow_dispatch:
-
 jobs:
-  registres:
+  europe:
     runs-on: ubuntu-latest
     timeout-minutes: 300
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       PYTHONUNBUFFERED: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Registre américain (FAA)
-        run: python scripts/import_faa.py
-      - name: Autres registres et base mondiale
+        with: {python-version: '3.12'}
+      - name: Livraisons neuves en Europe (Rotorspot + registres)
+        run: python scripts/import_europe.py
+      - name: Veille presse Europe (Airbus, HeliHub, Vertical + Gemini)
         if: ${{ !cancelled() }}
-        run: python scripts/import_registres.py
-      - name: Veille presse (livraisons et commandes)
-        if: ${{ !cancelled() }}
-        run: python scripts/veille_presse.py
-      - name: Traitement automatique des annonces
-        if: ${{ !cancelled() }}
-        run: python scripts/traiter_file.py
+        run: python scripts/presse_europe.py
       - name: Informations sur les exploitants (présentation, coordonnées, photo)
         if: ${{ !cancelled() }}
-        run: python scripts/enrichir.py --minutes 120
+        run: python scripts/enrichir.py --minutes 60
+      - name: Retrouver les exploitants à identifier (presse, sites, recherche web vérifiée)
+        if: ${{ !cancelled() }}
+        run: python scripts/combler.py --minutes 90
