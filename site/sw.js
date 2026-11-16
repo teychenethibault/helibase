@@ -1,6 +1,6 @@
 // Service worker minimal : rend Helibase installable et garde l'interface en cache.
 // Les données (Supabase) ne sont jamais mises en cache : elles viennent toujours du réseau.
-const CACHE = 'helibase-v2';
+const CACHE = 'helibase-v3';
 const SHELL = ['/', '/index.html', '/style.css', '/app.js', '/config.js', '/manifest.webmanifest',
   '/icons/logo.svg', '/icons/icon-192.png', '/icons/apple-touch-icon.png'];
 

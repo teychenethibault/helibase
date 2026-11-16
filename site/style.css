@@ -269,6 +269,20 @@ th { color: var(--text-3); font-weight: 600; font-size: .72rem; text-transform: 
 
 .empty { background: var(--surface); border-radius: var(--r); padding: 3rem 1.5rem; text-align: center; color: var(--text-2); box-shadow: var(--shadow); line-height: 1.5; }
 
+/* Connexion par mot de passe, compte, nouveaux comptes */
+.login-seg { margin-bottom: 1rem; }
+.login-seg button { padding: .4rem 1.2rem; }
+.avatar { cursor: pointer; border: none; }
+.nav-badge {
+  display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; margin-left: .35rem;
+  border-radius: 9px; background: var(--red); color: #fff; font-size: .7rem; font-weight: 600; vertical-align: 1px;
+}
+.badge.new-account { background: var(--accent-soft); color: var(--accent); margin-left: .4rem; }
+tr.row-new td { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.account-form { display: grid; gap: .8rem; text-align: left; margin-top: 1rem; }
+.account-form label { display: grid; gap: .3rem; font-size: .82rem; color: var(--text-2); }
+.dialog-actions { display: flex; justify-content: space-between; gap: .5rem; margin-top: 1.25rem; }
+
 /* Fenêtre d'installation */
 dialog {
   border: none; border-radius: 22px; padding: 1.75rem; max-width: 400px; width: calc(100% - 2rem);

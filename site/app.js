@@ -85,35 +85,58 @@ function hasPos(o) { return typeof o.lat === 'number' && typeof o.lon === 'numbe
 // ---------------------------------------------------------------------------
 // Connexion
 // ---------------------------------------------------------------------------
-function renderLogin(message) {
+function authErrorMessage(error) {
+  const m = (error?.message || '').toLowerCase();
+  if (m.includes('invalid login')) return 'E-mail ou mot de passe incorrect.';
+  if (m.includes('already registered') || m.includes('already exists')) return 'Un compte existe déjà avec cet e-mail : utilisez « Se connecter ».';
+  if (m.includes('password') && (m.includes('least') || m.includes('short'))) return 'Le mot de passe doit faire au moins 8 caractères.';
+  if (m.includes('email not confirmed')) return "Ce compte attend une confirmation par e-mail : prévenez l'administrateur.";
+  return error?.message || 'Erreur inconnue';
+}
+
+function renderLogin(message, mode = 'login') {
   setChrome(false);
+  const creating = mode === 'signup';
+  const name = h('input', { type: 'text', placeholder: 'Prénom et nom', autocomplete: 'name', required: creating });
   const email = h('input', { type: 'email', required: true, placeholder: 'Adresse e-mail', autocomplete: 'email' });
-  const button = h('button', { class: 'pill-btn accent wide', type: 'submit' }, 'Recevoir mon lien de connexion');
+  const password = h('input', { type: 'password', required: true, minlength: '8',
+    placeholder: creating ? 'Mot de passe (8 caractères minimum)' : 'Mot de passe',
+    autocomplete: creating ? 'new-password' : 'current-password' });
+  const button = h('button', { class: 'pill-btn accent wide', type: 'submit' }, creating ? 'Créer mon compte' : 'Se connecter');
   const status = h('div');
+
   const form = h('form', {
     onsubmit: async (e) => {
       e.preventDefault();
       button.disabled = true;
       status.replaceChildren();
-      const { error } = await supabase.auth.signInWithOtp({
-        email: email.value.trim(),
-        options: { emailRedirectTo: window.location.origin + '/' },
-      });
+      const credentials = { email: email.value.trim(), password: password.value };
+      const { data, error } = creating
+        ? await supabase.auth.signUp({ ...credentials, options: { data: { display_name: name.value.trim() } } })
+        : await supabase.auth.signInWithPassword(credentials);
       button.disabled = false;
-      status.replaceChildren(error
-        ? errorBox("L'envoi a échoué : " + error.message)
-        : h('div', { class: 'notice' }, 'Lien envoyé à ' + email.value.trim() +
-          '. Ouvrez-le depuis cet appareil (pensez à vérifier les indésirables).'));
+      if (error) { status.replaceChildren(errorBox(authErrorMessage(error))); return; }
+      if (creating && !data.session) {
+        status.replaceChildren(errorBox("Compte créé, mais la confirmation par e-mail est encore activée dans Supabase : prévenez l'administrateur."));
+      }
     },
-  }, email, button);
+  }, creating ? name : null, email, password, button);
+
+  const seg = h('div', { class: 'segmented login-seg' },
+    h('button', { type: 'button', class: creating ? '' : 'on', onclick: () => renderLogin(null, 'login') }, 'Se connecter'),
+    h('button', { type: 'button', class: creating ? 'on' : '', onclick: () => renderLogin(null, 'signup') }, 'Créer un compte'));
 
   render(h('section', { class: 'login' },
     h('img', { class: 'app-icon', src: '/icons/logo.svg', alt: '' }),
     h('h1', {}, 'Helibase'),
     h('p', { class: 'lead' }, "Les exploitants d'hélicoptères Airbus, livraison après livraison."),
+    seg,
     message ? errorBox(message) : null,
     form, status,
-    h('p', { class: 'hint' }, 'Première visite ? Votre compte est créé automatiquement.')));
+    h('p', { class: 'hint' }, creating
+      ? 'Votre compte est actif immédiatement.'
+      : "Mot de passe oublié ? Contactez l'administrateur.")));
+  (creating ? name : email).focus();
 }
 
 function setChrome(loggedIn) {
@@ -123,16 +146,68 @@ function setChrome(loggedIn) {
   chip.hidden = !loggedIn;
   if (loggedIn && state.profile) {
     chip.textContent = initials(state.profile.display_name || state.profile.email);
-    chip.title = (state.profile.display_name || '') + ' — ' + state.profile.email + ' (cliquer pour se déconnecter)';
+    chip.title = 'Mon compte — ' + (state.profile.display_name || '') + ' (' + state.profile.email + ')';
   }
-  document.getElementById('nav-admin').hidden = !(loggedIn && state.profile?.role === 'admin');
+  const navAdmin = document.getElementById('nav-admin');
+  navAdmin.hidden = !(loggedIn && state.profile?.role === 'admin');
+  if (!navAdmin.hidden) refreshAdminBadge();
+}
+
+// Nouveaux comptes depuis la dernière visite de l'administrateur sur la page Administration
+const ADMIN_SEEN_KEY = 'helibase.adminSeenAt';
+function adminSeenAt() {
+  try { return localStorage.getItem(ADMIN_SEEN_KEY) || '1970-01-01T00:00:00Z'; } catch { return '1970-01-01T00:00:00Z'; }
+}
+async function refreshAdminBadge() {
+  const nav = document.getElementById('nav-admin');
+  const { count } = await supabase.from('profiles').select('id', { count: 'exact', head: true }).gt('created_at', adminSeenAt());
+  nav.querySelector('.nav-badge')?.remove();
+  if (count > 0 && !location.hash.startsWith('#/admin')) nav.append(h('span', { class: 'nav-badge', title: 'Nouveaux comptes' }, String(count)));
 }
 
 async function logout() {
-  if (confirm('Se déconnecter de Helibase ?')) await supabase.auth.signOut();
+  await supabase.auth.signOut();
 }
 document.getElementById('btn-logout').addEventListener('click', logout);
-document.getElementById('user-chip').addEventListener('click', logout);
+document.getElementById('user-chip').addEventListener('click', openAccountDialog);
+
+// Mon compte : nom affiché, mot de passe, déconnexion
+function openAccountDialog() {
+  const dlg = document.getElementById('account-dialog');
+  const name = h('input', { type: 'text', value: state.profile?.display_name || '' });
+  const pwd = h('input', { type: 'password', minlength: '8', placeholder: 'Nouveau mot de passe (facultatif)', autocomplete: 'new-password' });
+  const status = h('div');
+  const save = h('button', { class: 'pill-btn accent wide', type: 'submit' }, 'Enregistrer');
+  const form = h('form', { class: 'account-form', onsubmit: async (e) => {
+    e.preventDefault();
+    save.disabled = true; status.replaceChildren();
+    const newName = name.value.trim();
+    if (newName && newName !== state.profile.display_name) {
+      const { error } = await supabase.from('profiles').update({ display_name: newName }).eq('id', state.session.user.id);
+      if (error) { save.disabled = false; status.replaceChildren(errorBox(error.message)); return; }
+      state.profile.display_name = newName;
+    }
+    if (pwd.value) {
+      const { error } = await supabase.auth.updateUser({ password: pwd.value });
+      if (error) { save.disabled = false; status.replaceChildren(errorBox(authErrorMessage(error))); return; }
+    }
+    save.disabled = false; pwd.value = '';
+    setChrome(true);
+    status.replaceChildren(h('div', { class: 'notice' }, 'Modifications enregistrées.'));
+  } },
+    h('label', {}, 'Nom affiché', name),
+    h('label', {}, 'Mot de passe', pwd),
+    save, status);
+  dlg.replaceChildren(
+    h('img', { src: '/icons/logo.svg', alt: '', width: '56', height: '56' }),
+    h('h2', {}, 'Mon compte'),
+    h('p', { class: 'small muted' }, state.profile?.email || ''),
+    form,
+    h('div', { class: 'dialog-actions' },
+      h('button', { class: 'pill-btn', type: 'button', onclick: () => dlg.close() }, 'Fermer'),
+      h('button', { class: 'pill-btn danger', type: 'button', onclick: () => { dlg.close(); logout(); } }, 'Se déconnecter')));
+  dlg.showModal();
+}
 
 // ---------------------------------------------------------------------------
 // Données
@@ -560,8 +635,13 @@ function notesPanel(operatorId, notes) {
 async function renderAdmin() {
   if (state.profile?.role !== 'admin') { location.hash = '#/'; return; }
   render(h('p', { class: 'muted center pad' }, 'Chargement…'));
-  const { data, error } = await supabase.from('profiles').select('*').order('created_at', { ascending: false });
+  const { data, error } = await supabase.rpc('admin_list_users');
   if (error) { render(errorBox(error.message)); return; }
+  const seenAt = adminSeenAt();
+  const isNew = (p) => new Date(p.created_at) > new Date(seenAt);
+  const newCount = data.filter(isNew).length;
+  try { localStorage.setItem(ADMIN_SEEN_KEY, new Date().toISOString()); } catch { /* navigation privée */ }
+  document.querySelector('#nav-admin .nav-badge')?.remove();
 
   const act = async (fn, args, label) => {
     if (!confirm(label + ' ?')) return;
@@ -573,17 +653,20 @@ async function renderAdmin() {
 
   render(
     h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Administration'),
-      h('div', { class: 'sub' }, plural(data.length, 'compte') + ' · ' + plural(active, 'actif')))),
+      h('div', { class: 'sub' }, plural(data.length, 'compte') + ' · ' + plural(active, 'actif') +
+        (newCount ? ' · ' + newCount + (newCount > 1 ? ' nouveaux' : ' nouveau') + ' depuis votre dernière visite' : '')))),
     h('section', { class: 'panel' },
       h('h2', {}, 'Utilisateurs'),
       h('p', { class: 'small muted' }, 'Tout nouveau compte a accès immédiatement. Révoquez un compte pour lui couper l\'accès aux données.'),
       h('table', {},
-        h('thead', {}, h('tr', {}, ['Utilisateur', 'Inscrit le', 'Statut', ''].map((t) => h('th', {}, t)))),
+        h('thead', {}, h('tr', {}, ['Utilisateur', 'Inscrit le', 'Dernière connexion', 'Statut', ''].map((t) => h('th', {}, t)))),
         h('tbody', {}, data.map((p) => {
           const self = p.id === state.session.user.id;
-          return h('tr', {},
-            h('td', {}, h('div', {}, h('strong', {}, p.display_name || '')), h('div', { class: 'small muted' }, p.email)),
+          return h('tr', { class: isNew(p) ? 'row-new' : null },
+            h('td', {}, h('div', {}, h('strong', {}, p.display_name || ''), isNew(p) ? h('span', { class: 'badge new-account' }, 'Nouveau') : null),
+              h('div', { class: 'small muted' }, p.email)),
             h('td', {}, fmtDate(p.created_at)),
+            h('td', { class: 'small' }, p.last_sign_in_at ? fmtDateTime(p.last_sign_in_at) : '—'),
             h('td', {},
               h('span', { class: 'badge ' + p.status }, p.status === 'active' ? 'Actif' : 'Révoqué'), ' ',
               p.role === 'admin' ? h('span', { class: 'badge admin' }, 'Admin') : null),
