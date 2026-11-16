@@ -41,7 +41,7 @@ SINCE = '2024-01-01'
 FEEDS = [
     ('Airbus', 'https://www.airbus.com/en/generate-rss-feeds?tid=15581&fid=29716', False),
     ('HeliHub', 'https://www.helihub.com/tag/airbus-helicopters/feed/', True),
-    ('Vertical', 'https://verticalmag.com/tag/airbus-helicopters/feed/', True),
+    ('Vertical', 'https://verticalmag.com/feed/', True),
 ]
 MODEL_RE = re.compile(r'\b(ACH ?1[2-7][05]|H ?1(?:2[05]|3[05]|4[05]|60|75)M?|H ?2(?:15|25)M?|NH ?90|Tig(?:er|re)|'
                       r'Caracal|Gu[ée]pard|EC ?1[2-7]5|BK ?117|AS ?350|Lakota|Sea Tiger)\b', re.I)
@@ -81,17 +81,32 @@ def read_feed(name, url, paged, backfill, log=print):
     while True:
         u = url if page == 1 else url + ('&' if '?' in url else '?') + f'paged={page}'
         try:
-            root = ET.fromstring(get(u))
+            raw = get(u)
         except Exception as e:
             if page == 1:
                 log(f'  {name} : flux indisponible ({e})')
             break
         batch = []
-        for it in root.iter('item'):
-            content = it.find('content:encoded', NS)
-            batch.append({'source': name, 'title': clean(it.findtext('title')), 'link': (it.findtext('link') or '').strip(),
-                          'date': parse_date(it.findtext('pubDate')),
-                          'text': clean((content.text if content is not None else '') or it.findtext('description'))[:3000]})
+        try:
+            root = ET.fromstring(raw)
+            for it in root.iter('item'):
+                content = it.find('content:encoded', NS)
+                batch.append({'source': name, 'title': clean(it.findtext('title')), 'link': (it.findtext('link') or '').strip(),
+                              'date': parse_date(it.findtext('pubDate')),
+                              'text': clean((content.text if content is not None else '') or it.findtext('description'))[:3000]})
+        except ET.ParseError:
+            # Flux légèrement mal formé (fréquent) : lecture article par article
+            txt = raw.decode('utf-8', 'replace')
+            def tag(block, t):
+                m = re.search(rf'<{t}[^>]*>([\s\S]*?)</{t}>', block)
+                v = m.group(1) if m else ''
+                return re.sub(r'^<!\[CDATA\[|\]\]>$', '', v.strip())
+            for block in re.findall(r'<item[\s>][\s\S]*?</item>', txt):
+                batch.append({'source': name, 'title': clean(tag(block, 'title')), 'link': clean(tag(block, 'link')),
+                              'date': parse_date(clean(tag(block, 'pubDate'))),
+                              'text': clean(tag(block, 'content:encoded') or tag(block, 'description'))[:3000]})
+            if not batch and page == 1:
+                log(f'  {name} : flux illisible (début : {txt[:120]!r})')
         items += batch
         oldest = min((b['date'] for b in batch if b['date']), default=None)
         if not (paged and backfill and batch and oldest and oldest >= SINCE and page < 60):
@@ -180,8 +195,11 @@ def ask_gemini(key, model, articles, log=print):
                 if not per_minute:
                     log(f'    quota épuisé pour {model.split("/")[-1]} ({why})')
                     return 'quota'
+            if e.code in (500, 502, 503, 504) and attempt >= 1:
+                log(f'    {model.split("/")[-1]} surchargé ({e.code}) : passage au modèle suivant')
+                return 'quota'
             if e.code in (429, 500, 502, 503, 504) and attempt < 3:
-                wait = 30 * (attempt + 1)
+                wait = 20
                 log(f'    Gemini occupé ({e.code}), nouvel essai dans {wait} s')
                 time.sleep(wait)
                 continue
