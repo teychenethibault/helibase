@@ -89,6 +89,30 @@ def name_in_text(name, text):
     return len(hits) >= max(1, (len(strong) + 1) // 2)
 
 
+MODEL_WORDS = [
+    (r'H ?125|Ecureuil|AS ?350', r'H ?125|AS ?350|[ÉE]cureuil|A-?Star|B3e?'),
+    (r'H ?130|EC ?130', r'H ?130|EC ?130'),
+    (r'H ?135|EC ?135', r'H ?135|EC ?135'),
+    (r'H ?145|BK ?117|EC ?145', r'H ?145|EC ?145|BK ?117|D-?3\b'),
+    (r'H ?140', r'H ?140'),
+    (r'H ?160', r'H ?160'),
+    (r'H ?175|EC ?175', r'H ?175|EC ?175'),
+    (r'Super Puma|AS ?332|H ?2[12]5|EC ?225|EC ?725', r'H ?2[12]5|AS ?332|EC ?[27]25|Super ?Puma|Caracal|Cougar'),
+    (r'Dauphin|AS ?365|H ?155', r'Dauphin|AS ?365|H ?155|EC ?155|Panther'),
+    (r'NH ?90', r'NH ?90|Caiman|Sea ?Lion|Sea ?Tiger|TTH|NFH'),
+    (r'Tig(re|er)|EC ?665', r'Tig(re|er)|EC ?665'),
+]
+
+
+def model_on_page(model, text):
+    """Une immatriculation peut avoir servi à un autre appareil auparavant (ex. G-TIGT, ancien Super Puma) :
+    la page doit aussi citer le bon type d'hélicoptère."""
+    for key, words in MODEL_WORDS:
+        if re.search(key, model or '', re.I):
+            return bool(re.search(r'(?<![A-Za-z0-9])(' + words + r')(?![0-9])', text, re.I))
+    return False
+
+
 def norm_model(m):
     m = re.sub(r'\s+', '', (m or '')).upper()
     m = re.sub(r'^EC135|^BK117D-?3', lambda x: 'H135' if x.group(0).startswith('EC') else 'H145', m)
@@ -237,7 +261,7 @@ def from_operator_sites(ctx, minutes):
         pages = site_pages(o['website'], 6)
         for url, text in pages:
             for a in ctx.pending():
-                if reg_pattern(a['registration']).search(text):
+                if reg_pattern(a['registration']).search(text) and model_on_page(a.get('model'), text):
                     host = urllib.parse.urlsplit(url).netloc.replace('www.', '')
                     n += ctx.link(a, o['name'], o.get('country'), 'site_exploitant', 'site_exploitant',
                                   f"Site de l'exploitant ({host})", url, 4)
@@ -432,7 +456,7 @@ def from_web_search(ctx, minutes, limit):
             except Exception:
                 continue
             text = page_text(htm)
-            if reg_pattern(a['registration']).search(text) and name_in_text(name, text):
+            if reg_pattern(a['registration']).search(text) and name_in_text(name, text) and model_on_page(a.get('model'), text):
                 proof = final
                 break
         if not proof:
@@ -468,6 +492,40 @@ def from_press_unique(ctx):
     print(f'  presse (correspondance unique) : {n} appareil(s) rattaché(s)')
 
 
+REG_LIKE = re.compile(r'^[A-Z0-9]{1,2}-[A-Z0-9]{2,5}$', re.I)
+
+
+def undo_commons(store):
+    """Remet « à identifier » les appareils rattachés par Wikimedia Commons (méthode retirée car peu fiable)
+    et supprime les faux exploitants créés à cette occasion (noms qui sont en fait des immatriculations)."""
+    from helibase.europe import EUROPE
+    bad = store.select('assignments', 'id,operator_id,helicopter_id', operator_method='eq.commons')
+    if not bad:
+        return
+    ops = {o['id']: o for o in store.select('operators', 'id,name,country,is_placeholder')}
+    placeholders = {o['country']: o for o in ops.values() if o.get('is_placeholder') and o['name'].startswith('Exploitant à identifier')}
+    # pays d'origine : celui de l'exploitant rattaché à tort (même pays que l'immatriculation)
+    for a in bad:
+        c = (ops.get(a['operator_id']) or {}).get('country')
+        ph = placeholders.get(c)
+        if not ph and c in EUROPE:
+            ph = store.insert('operators', [{'name': f'Exploitant à identifier — {country_name(c)}', 'country': c,
+                                             'sector': 'civil', 'is_placeholder': True,
+                                             'lat': EUROPE[c][1], 'lon': EUROPE[c][2]}])[0]
+            placeholders[c] = ph
+        if ph:
+            store.update('assignments', {'operator_id': ph['id'], 'source_id': None, 'operator_method': None},
+                         id=f'eq.{a["id"]}')
+    used = {a['operator_id'] for a in store.select('assignments', 'operator_id')} | \
+           {o['operator_id'] for o in store.select('orders', 'operator_id')}
+    removed = 0
+    for o in {ops[a['operator_id']]['id']: ops[a['operator_id']] for a in bad if a['operator_id'] in ops}.values():
+        if o['id'] not in used and not o.get('is_placeholder'):
+            store.delete('operators', id=f'eq.{o["id"]}')
+            removed += 1
+    print(f'Correction : {len(bad)} rattachement(s) Wikimedia Commons annulé(s), {removed} faux exploitant(s) supprimé(s)')
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--dry-run', action='store_true')
@@ -477,12 +535,13 @@ def main():
     args = p.parse_args()
     from helibase.store import Store
     store = Store()
+    if not args.dry_run:
+        undo_commons(store)
     ctx = Ctx(store, args.dry_run)
     before = len(ctx.todo)
     print(f'{before} appareils dont l\'exploitant est à identifier')
     steps = [('presse', lambda: from_press_registrations(ctx)),
              ('site', lambda: from_operator_sites(ctx, args.minutes // 3)),
-             ('commons', lambda: from_commons(ctx, args.minutes // 3)),
              ('web', lambda: from_web_search(ctx, args.minutes // 3, args.web_limit)),
              ('unique', lambda: from_press_unique(ctx))]
     for name, fn in steps:

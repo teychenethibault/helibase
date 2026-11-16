@@ -309,9 +309,10 @@ def main():
             merge_military(store)
         except Exception as e:
             print(f'Regroupement des exploitants militaires impossible ({e})')
-    backfill = not done
+    # Rattrapage depuis 2024 tant qu'il n'a pas été mené à son terme sans erreur
+    backfill = not (store and store.select('source_cache', 'key', key='eq.meta:press_backfill_done'))
     if backfill:
-        print(f'Premier passage : rattrapage des articles depuis {SINCE}')
+        print(f'Rattrapage des articles depuis {SINCE} (jusqu\'à ce que tout soit analysé)')
 
     articles = []
     for name, url, paged in FEEDS:
@@ -325,7 +326,11 @@ def main():
         if MODEL_RE.search(a['title'] + ' ' + a['text']):
             todo.append({**a, 'key': k})
     print(f'{len(todo)} articles à analyser (sur {len(articles)} lus)')
+    all_failed = set()
     if not todo:
+        if store and backfill:
+            store.insert('source_cache', [{'key': 'meta:press_backfill_done', 'payload': {'date': dt.date.today().isoformat()}}],
+                         on_conflict='key')
         return
 
     print('Test des modèles Gemini :')
@@ -374,6 +379,7 @@ def main():
             e['country'] = c
             kept.append(e)
         def remember():   # articles analysés : jamais relus
+            all_failed.update(failed)
             ok = [a for a in todo if a['key'] not in failed]
             for i in range(0, len(ok), 200):
                 store.insert('source_cache', [{'key': a['key'], 'payload': {'title': a['title'], 'link': a['link']}}
@@ -452,6 +458,12 @@ def main():
     for r in range(0, len(todo), step):
         print(f'— Tranche {r // step + 1} / {(len(todo) - 1) // step + 1}')
         process(todo[r:r + step])
+    if store and backfill and not all_failed:
+        store.insert('source_cache', [{'key': 'meta:press_backfill_done', 'payload': {'date': dt.date.today().isoformat()}}],
+                     on_conflict='key')
+        print('Rattrapage terminé : les prochains passages ne liront que les nouveaux articles')
+    elif all_failed:
+        print(f'{len(all_failed)} article(s) non analysé(s) : repris au prochain passage')
 
 
 if __name__ == '__main__':
