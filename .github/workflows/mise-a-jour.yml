@@ -25,6 +25,9 @@ jobs:
       - name: Autres registres et base mondiale
         if: always()
         run: python scripts/import_registres.py
+      - name: Veille presse (livraisons et commandes)
+        if: always()
+        run: python scripts/veille_presse.py
       - name: Informations sur les exploitants (présentation, coordonnées, photo)
         if: always()
         run: python scripts/enrichir.py --minutes 120
