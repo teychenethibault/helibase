@@ -28,6 +28,9 @@ jobs:
       - name: Veille presse (livraisons et commandes)
         if: always()
         run: python scripts/veille_presse.py
+      - name: Traitement automatique des annonces
+        if: always()
+        run: python scripts/traiter_file.py
       - name: Informations sur les exploitants (présentation, coordonnées, photo)
         if: always()
         run: python scripts/enrichir.py --minutes 120
