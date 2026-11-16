@@ -46,7 +46,7 @@ def geocode(city, region, country):
 
 
 def ingest(store, records, source_label, source_url, source_kind='registre', since='2024-01-01',
-           do_geocode=True, log=print, confidence=4):
+           do_geocode=True, log=print, confidence=4, all_years=False):
     stats = {'lus': 0, 'airbus': 0, 'hors_periode': 0, 'stock': 0, 'sans_exploitant': 0,
              'nouvelles_affectations': 0, 'reventes': 0, 'inchanges': 0, 'nouveaux_exploitants': 0,
              'a_verifier': 0, 'geocodes': 0}
@@ -55,12 +55,13 @@ def ingest(store, records, source_label, source_url, source_kind='registre', sin
     keep = []
     for r in records:
         stats['lus'] += 1
-        mapped = map_any(r.get('manufacturer'), r.get('registry_model'), r.get('year_built'), r.get('typecode'))
+        year_hint = r.get('year_built') or (r.get('registered_on') or '')[:4] or None
+        mapped = map_any(r.get('manufacturer'), r.get('registry_model'), year_hint, r.get('typecode'))
         if not mapped or not str(r.get('msn') or '').strip():
             continue
         stats['airbus'] += 1
         year = _int(r.get('year_built'))
-        if (r.get('registered_on') or '') < since and (year or 0) < int(since[:4]):
+        if not all_years and (r.get('registered_on') or '') < since and (year or 0) < int(since[:4]):
             stats['hors_periode'] += 1
             continue
         if not (r.get('owner') or '').strip():
@@ -70,6 +71,12 @@ def ingest(store, records, source_label, source_url, source_kind='registre', sin
             stats['stock'] += 1
             continue
         r['family'], r['model'] = mapped
+        if not year_hint:   # sans aucune date : le numéro de série situe l'appareil avant ou après 2014-2015
+            n = _int(r.get('msn')) or 0
+            if r['model'] == 'AS350 B3' and n >= 7800:
+                r['model'] = 'H125'
+            elif r['model'] == 'EC135' and n >= 1200:
+                r['model'] = 'H135'
         r['msn'] = str(r['msn']).strip().lstrip('0') or str(r['msn']).strip()
         keep.append(r)
     keep.sort(key=lambda r: r.get('registered_on') or '')
@@ -78,6 +85,11 @@ def ingest(store, records, source_label, source_url, source_kind='registre', sin
         f'{stats["sans_exploitant"]} sans exploitant connu)')
     if not keep:
         return stats
+
+    # Source sans dates : au premier import, les dates restent inconnues ; ensuite, un nouvel
+    # appareil reçoit la date à laquelle il est apparu dans le registre.
+    first_import = all_years and not store.select('update_log', 'id', source=f'eq.{source_label}')
+    today = dt.date.today().isoformat()
 
     # 2. Source de cette mise à jour
     source = store.insert('sources', [{'kind': source_kind, 'label': source_label, 'url': source_url,
@@ -118,6 +130,7 @@ def ingest(store, records, source_label, source_url, source_kind='registre', sin
                     op = store.insert('operators', [{
                         'name': pretty_name(owner), 'country': r.get('country'),
                         'city': pretty_name(r.get('city') or '') or None,
+                        **({'address': r['address']} if r.get('address') else {}),
                         'activities': infer_activities(owner),
                         'sector': 'etatique' if r.get('government') else 'civil',
                     }])[0]
@@ -149,9 +162,16 @@ def ingest(store, records, source_label, source_url, source_kind='registre', sin
             store.update('assignments', {'end_date': r.get('registered_on') or dt.date.today().isoformat()},
                          id=f'eq.{current["id"]}')
             stats['reventes'] += 1
+        if all_years and not r.get('registered_on') and not first_import:
+            r['registered_on'] = today
         year = _int(r.get('year_built')) or 0
         reg_year = int((r.get('registered_on') or '0000')[:4] or 0)
-        is_new = hid not in known_helis and not current and year >= reg_year - 1
+        if not r.get('registered_on') or hid in known_helis or current:
+            is_new = False if (hid in known_helis or current) else None
+        elif not year:
+            is_new = None          # année de construction inconnue
+        else:
+            is_new = year >= reg_year - 1
         row = {'helicopter_id': hid, 'operator_id': op['id'] if op else None,
                'owner_name': pretty_name(owner) if financial else None,
                'registration': r.get('registration'), 'start_date': r.get('registered_on'),

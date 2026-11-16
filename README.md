@@ -10,6 +10,8 @@ Outil de recherche des exploitants d'hélicoptères Airbus livrés depuis 2024.
 Secrets GitHub nécessaires (Settings → Secrets and variables → Actions) :
 `SUPABASE_URL` et `SUPABASE_SECRET_KEY`.
 
-- `scripts/import_registres.py` : registres d'Australie, Nouvelle-Zélande, Norvège, Finlande, Canada, puis base mondiale OpenSky pour les autres pays (Europe comprise).
+- `scripts/import_registres.py` : registres de France (DGAC, flotte complète), Suisse, Brésil, Pays-Bas, Australie, Nouvelle-Zélande, Norvège, Finlande, Canada, puis base mondiale OpenSky pour les autres pays (Europe comprise).
 - `scripts/enrichir.py` : présentation, coordonnées et photo des exploitants (Wikidata/Wikipédia, OpenStreetMap, site de l'exploitant).
 - `supabase/04_fiche_exploitant.sql` : colonnes de la fiche exploitant (à exécuter une fois).
+- `supabase/05_corrections.sql` : corrections après le premier import (à exécuter une fois).
+- `scripts/veille_presse.py` : veille de la presse mondiale (Google Actualités, 6 langues) → Administration › À vérifier.

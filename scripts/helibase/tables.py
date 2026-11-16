@@ -6,6 +6,7 @@ import io
 import json
 import re
 import unicodedata
+import urllib.error
 import urllib.request
 import zipfile
 import xml.etree.ElementTree as ET
@@ -20,9 +21,17 @@ csv.field_size_limit(10_000_000)
 # Téléchargement
 # ---------------------------------------------------------------------------
 def http_get(url, timeout=300, accept='*/*'):
-    req = urllib.request.Request(url, headers={'User-Agent': BROWSER_UA, 'Accept': accept})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+    last = None
+    for ua in (BROWSER_UA, 'Helibase/1.0 (+https://helibase.pages.dev)', 'curl/8.5.0'):
+        req = urllib.request.Request(url, headers={'User-Agent': ua, 'Accept': accept})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as e:
+            last = e
+            if e.code not in (401, 403, 406, 429):
+                raise
+    raise last
 
 
 def find_link(page_url, pattern):
@@ -49,13 +58,17 @@ def _decode(data):
 def read_csv(data, header=True):
     text = _decode(data) if isinstance(data, bytes) else data
     sample = text[:20000]
-    first = sample.splitlines()[0] if sample else ''
+    lines = sample.splitlines()[:6]
+    first = max(lines, key=lambda l: max(l.count(d) for d in ',;\t|')) if lines else ''
     delim = max([',', ';', '\t', '|'], key=first.count)
     quote = "'" if first.count("'") > first.count('"') and first.startswith("'") else '"'
     rows = [r for r in csv.reader(io.StringIO(text), delimiter=delim, quotechar=quote) if any(c.strip() for c in r)]
     if not rows:
         return [], []
-    return (rows[0], rows[1:]) if header else (None, rows)
+    if not header:
+        return None, rows
+    start = max(range(min(5, len(rows))), key=lambda i: len(rows[i]))
+    return rows[start], rows[start + 1:]
 
 
 def read_xlsx(data):
@@ -157,31 +170,32 @@ def norm(text):
 FIELDS = {
     'registration': (['mark', 'registration', 'registrationmark', 'regmark', 'reg', 'immatriculation',
                       'kjennemerke', 'registreringsmerke', 'tunnus', 'rekisteritunnus', 'registreringsnummer',
-                      'nationalitymark'],
-                     ['registrationmark', 'kjennemerke', 'rekisteritunnus', 'immatric', 'registration']),
+                      'nationalitymark', 'marca', 'registratie', 'inschrijvingskenmerk'],
+                     ['registrationmark', 'inschrijvingskenmerk', 'kjennemerke', 'rekisteritunnus', 'immatric', 'registration']),
     'manufacturer': (['manu', 'manufacturer', 'make', 'mfr', 'produsent', 'fabrikant', 'valmistaja',
-                      'manufacturername', 'constructeur', 'tilvirker'],
+                      'manufacturername', 'constructeur', 'tilvirker', 'nmfabricante', 'fabricante'],
                      ['manufacturer', 'produsent', 'valmistaja', 'fabrik', 'tilvirker', 'hersteller']),
     'model': (['model', 'modell', 'malli', 'modelname', 'aircraftmodel', 'type', 'typ', 'tyyppi'],
-              ['model', 'modell', 'malli', 'typebetegnelse', 'tyyppi']),
+              ['dsmodelo', 'model', 'modell', 'malli', 'typebetegnelse', 'tyyppi', 'modelo']),
     'serial': (['serial', 'serialno', 'serialnumber', 'msn', 'cn', 'serienummer', 'sarjanumero',
-                'constructionnumber', 'produksjonsnummer', 'serienr'],
-               ['serial', 'serienum', 'serienr', 'sarjanum', 'produksjonsnum', 'construction']),
+                'constructionnumber', 'produksjonsnummer', 'serienr', 'nrserie'],
+               ['serial', 'serienum', 'serienr', 'sarjanum', 'produksjonsnum', 'construction', 'nrserie']),
     'year': (['mfgyr', 'year', 'built', 'byggear', 'valmistusvuosi', 'yearofmanufacture', 'yearbuilt'],
-             ['mfgyr', 'yearofmanu', 'manufactureyear', 'byggear', 'produksjonsar', 'valmistusvuosi', 'yearbuilt']),
-    'operator': ([], ['regopname', 'operatorname', 'operator', 'bruker', 'kayttaja', 'haltija', 'opname']),
-    'owner': ([], ['regholdname', 'ownername', 'owner', 'eier', 'omistaja', 'registrant', 'holdername',
+             ['mfgyr', 'yearofmanu', 'manufactureyear', 'byggear', 'produksjonsar', 'valmistusvuosi', 'yearbuilt', 'anofabricacao', 'bouwjaar']),
+    'operator': ([], ['regopname', 'operatorname', 'nmoperador', 'operator', 'bruker', 'kayttaja', 'haltija', 'opname', 'houder', 'operador']),
+    'owner': ([], ['regholdname', 'ownername', 'owner', 'eier', 'omistaja', 'registrant', 'holdername', 'proprietario', 'eigenaar',
                    'holder', 'name', 'navn', 'nimi']),
     'city': ([], ['regopsuburb', 'opsuburb', 'regholdsuburb', 'suburb', 'city', 'town', 'poststed',
-                  'postitoimipaikka', 'kotipaikka', 'locality', 'sted']),
-    'region': ([], ['regopstate', 'regholdstate', 'state', 'province', 'region', 'fylke']),
+                  'postitoimipaikka', 'kotipaikka', 'locality', 'sted', 'woonplaats', 'vestigingsplaats', 'plaats', 'municipio', 'cidade']),
+    'region': ([], ['regopstate', 'regholdstate', 'state', 'province', 'region', 'fylke', 'ufoperador', 'sguf']),
     'owner_city': ([], ['regholdsuburb', 'ownercity']),
+    'address': ([], ['owneraddress', 'operatoraddress', 'address', 'adresse', 'osoite', 'adresse']),
     'owner_region': ([], ['regholdstate', 'ownerstate']),
     'date': ([], ['regholdcommdate', 'regopcommdate', 'registrationdate', 'dateofregistration',
                   'registreringsdato', 'registrertdato', 'registrert', 'rekisterointipaiva', 'rekisteroity',
-                  'regdate', 'dateregistered', 'registered', 'issuedate', 'certissue', 'dateofissue']),
+                  'regdate', 'dateregistered', 'registered', 'issuedate', 'certissue', 'dateofissue', 'dtmatricula', 'datuminschrijving', 'inschrijfdatum', 'registratiedatum']),
 }
-EXCLUDE = re.compile(r'eng|motor|prop|moteur|engine|addr|adresse|osoite|email|phone|post(nr|nummer|code)|zip')
+EXCLUDE = re.compile(r'eng|motor|propel|helice|moteur|engine|addr|adresse|osoite|email|phone|post(nr|nummer|code)|zip')
 
 
 def detect_columns(header):
@@ -270,8 +284,14 @@ def records(header, rows, cols, country, reg_prefix='', fixed=None):
         city, region = get(row, 'city'), get(row, 'region')
         if not operator and 'owner_city' in cols:
             city, region = get(row, 'owner_city') or city, get(row, 'owner_region') or region
+        address = get(row, 'address')
+        if not city and address:    # « PO Box 2240, TAUPO 3351, New Zealand » → Taupo
+            parts = [p.strip() for p in address.split(',') if p.strip()]
+            if len(parts) >= 2:
+                city = re.sub(r'\d+', '', parts[-2]).strip().title()
         out.append({
             'registration': reg or None,
+            'address': address or None,
             'msn': get(row, 'serial'),
             'manufacturer': get(row, 'manufacturer'),
             'registry_model': get(row, 'model'),

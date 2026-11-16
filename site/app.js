@@ -69,7 +69,7 @@ function fmtDateTime(d) {
   return new Date(d).toLocaleString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 function plural(n, word) { return n + ' ' + word + (n > 1 ? 's' : ''); }
-function render(...nodes) { destroyMap(); app.replaceChildren(...nodes); }
+function render(...nodes) { destroyMap(); app.replaceChildren(...nodes.flat().filter((n) => n !== null && n !== undefined && n !== false)); }
 function errorBox(message) { return h('div', { class: 'notice error' }, message); }
 function initials(name) {
   const words = String(name || '?').replace(/[^\p{L}\p{N} ]/gu, ' ').split(/\s+/).filter((w) => w.length > 2 || /^\p{Lu}/u.test(w));
@@ -218,9 +218,21 @@ async function loadProfile() {
   state.profile = data;
 }
 
+// La base renvoie au plus 1000 lignes par requête : on lit la liste par pages
+async function selectAll(build, page = 1000) {
+  const rows = [];
+  for (let from = 0; ; from += page) {
+    const { data, error } = await build().range(from, from + page - 1);
+    if (error) return { data: null, error };
+    rows.push(...data);
+    if (data.length < page) return { data: rows, error: null };
+  }
+}
+
 async function loadOperators() {
   const [ops, favs] = await Promise.all([
-    supabase.from('operator_overview').select('*').order('last_delivery_date', { ascending: false, nullsFirst: false }),
+    selectAll(() => supabase.from('operator_overview').select('*')
+      .order('last_delivery_date', { ascending: false, nullsFirst: false }).order('id')),
     supabase.from('favorites').select('operator_id'),
   ]);
   if (ops.error) throw ops.error;
@@ -429,7 +441,8 @@ function operatorCard(o) {
         o.last_delivery_model
           ? h('div', { class: 'value' }, o.last_delivery_model,
               h('small', {}, fmtDate(o.last_delivery_date)),
-              h('span', { class: 'tag ' + (o.last_delivery_is_new ? 'new' : 'used') }, o.last_delivery_is_new ? 'Neuf' : 'Occasion'))
+              o.last_delivery_is_new === null || o.last_delivery_is_new === undefined ? null
+                : h('span', { class: 'tag ' + (o.last_delivery_is_new ? 'new' : 'used') }, o.last_delivery_is_new ? 'Neuf' : 'Occasion'))
           : h('div', { class: 'value' }, h('small', {}, '—'))),
       h('div', { class: 'metric' },
         h('div', { class: 'eyebrow' }, 'Flotte Airbus'),
@@ -527,7 +540,7 @@ async function renderOperator(id) {
     supabase.from('operator_overview').select('*').eq('id', id).maybeSingle(),
     supabase.from('assignments').select('*, helicopters(*), sources(label, url)').eq('operator_id', id)
       .order('start_date', { ascending: false, nullsFirst: false }),
-    supabase.from('orders').select('*').eq('operator_id', id).order('announced_on', { ascending: false }),
+    supabase.from('orders').select('*, sources(label, url)').eq('operator_id', id).order('announced_on', { ascending: false }),
     supabase.from('notes').select('id, body, created_at, updated_at, author_id, profiles(display_name, email)')
       .eq('operator_id', id).order('created_at', { ascending: false }),
     supabase.from('bases').select('*').eq('operator_id', id),
@@ -600,8 +613,8 @@ async function renderOperator(id) {
           h('td', {}, h('strong', {}, a.helicopters?.model || '')),
           h('td', {}, a.helicopters?.msn || ''),
           h('td', {}, a.registration || ''),
-          h('td', {}, fmtDate(a.start_date)),
-          h('td', {}, h('span', { class: 'tag ' + (a.is_new ? 'new' : 'used') }, a.is_new ? 'Neuf' : 'Occasion'),
+          h('td', {}, a.start_date ? fmtDate(a.start_date) : h('span', { class: 'muted small' }, 'date inconnue')),
+          h('td', {}, a.is_new === null ? null : h('span', { class: 'tag ' + (a.is_new ? 'new' : 'used') }, a.is_new ? 'Neuf' : 'Occasion'),
             a.end_date ? h('div', { class: 'small muted' }, 'parti le ' + fmtDate(a.end_date)) : null),
           h('td', { class: 'small' }, a.sources?.url ? h('a', { href: a.sources.url, target: '_blank', rel: 'noopener' }, a.sources.label) : (a.sources?.label || ''))))))
     : h('p', { class: 'muted' }, 'Aucun appareil enregistré.');
@@ -612,12 +625,23 @@ async function renderOperator(id) {
       h('span', { class: 'chevron', 'aria-hidden': 'true' }, '›')),
     fleetTable);
 
-  const ordersPanel = orders.length ? h('section', { class: 'panel' }, h('h2', {}, 'Livraisons à venir'),
-    h('table', {}, h('tbody', {}, orders.map((c) => h('tr', {},
-      h('td', {}, h('strong', {}, (c.quantity ? c.quantity + ' × ' : '') + c.model)),
-      h('td', {}, c.expected ? 'Échéance ' + c.expected : ''),
-      h('td', { class: 'small muted' }, c.announced_on ? 'Annoncé le ' + fmtDate(c.announced_on) : '')))))) : null;
-
+  const upcoming = orders.filter((c) => c.status !== 'livree');
+  const pressDelivered = orders.filter((c) => c.status === 'livree');
+  const srcLink = (c) => c.sources?.url ? h('a', { href: c.sources.url, target: '_blank', rel: 'noopener' }, c.sources.label || 'Article')
+    : (c.sources?.label || '');
+  const ordersPanel = [
+    pressDelivered.length ? h('section', { class: 'panel' }, h('h2', {}, 'Livraisons relevées dans la presse'),
+      h('table', {}, h('tbody', {}, pressDelivered.map((c) => h('tr', {},
+        h('td', {}, h('strong', {}, (c.quantity ? c.quantity + ' × ' : '') + c.model)),
+        h('td', {}, c.announced_on ? fmtDate(c.announced_on) : ''),
+        h('td', { class: 'small' }, srcLink(c))))))) : null,
+    upcoming.length ? h('section', { class: 'panel' }, h('h2', {}, 'Livraisons à venir'),
+      h('table', {}, h('tbody', {}, upcoming.map((c) => h('tr', {},
+        h('td', {}, h('strong', {}, (c.quantity ? c.quantity + ' × ' : '') + c.model)),
+        h('td', {}, c.expected ? 'Échéance ' + c.expected : ''),
+        h('td', { class: 'small muted' }, c.announced_on ? 'Annoncé le ' + fmtDate(c.announced_on) : ''),
+        h('td', { class: 'small' }, srcLink(c))))))) : null,
+  ];
   const mapBox = h('div', { class: 'mini-map' });
   const locPanel = h('section', { class: 'panel' }, h('h2', {}, 'Localisation'), mapBox,
     bases.length ? h('p', { class: 'small muted' }, 'Bases : ' + bases.map((b) => b.name).join(', ')) : null);
@@ -701,6 +725,111 @@ function notesPanel(operatorId, notes) {
 // ---------------------------------------------------------------------------
 // Administration
 // ---------------------------------------------------------------------------
+function adminTabs(active) {
+  return h('div', { class: 'segmented admin-tabs' },
+    h('a', { href: '#/admin', class: active === 'users' ? 'on' : null }, 'Utilisateurs'),
+    h('a', { href: '#/admin/verifier', class: active === 'review' ? 'on' : null }, 'À vérifier'));
+}
+
+// ---------------------------------------------------------------------------
+// Administration : annonces à vérifier (presse) et appareils de loueurs à rattacher
+// ---------------------------------------------------------------------------
+async function renderReview() {
+  if (state.profile?.role !== 'admin') { location.hash = '#/'; return; }
+  render(adminTabs('review'), h('p', { class: 'muted center pad' }, 'Chargement…'));
+  const [q, ops] = await Promise.all([
+    selectAll(() => supabase.from('review_queue').select('*').eq('status', 'a_verifier').order('created_at', { ascending: false }).order('id')),
+    state.operators?.length ? { data: state.operators } : loadOperators().then(() => ({ data: state.operators })),
+  ]);
+  if (q.error) { render(adminTabs('review'), errorBox(q.error.message)); return; }
+  let items = q.data;
+  const filter = state.reviewFilter || 'presse';
+  const isPress = (it) => it.payload?.origin === 'presse';
+  const shown = items.filter((it) => (filter === 'presse') === isPress(it));
+  const opNames = h('datalist', { id: 'op-names' }, (ops.data || []).map((o) => h('option', { value: o.name }, countryName(o.country))));
+
+  const card = (it) => {
+    const p = it.payload || {};
+    const press = isPress(it);
+    const field = (label, input) => h('label', { class: 'field' }, h('span', {}, label), input);
+    const opIn = h('input', { list: 'op-names', value: press ? (p.operator || '') : '', placeholder: 'Nom de l\'exploitant' });
+    const ctyIn = h('input', { value: (p.country || '').toUpperCase(), maxlength: 2, placeholder: 'FR', class: 'cty' });
+    const kindIn = h('select', {}, h('option', { value: 'livraison', selected: it.kind === 'livraison' }, 'Livraison'),
+      h('option', { value: 'commande', selected: it.kind === 'commande' }, 'Commande'));
+    const modelIn = h('input', { value: p.model || '', class: 'mdl' });
+    const qtyIn = h('input', { type: 'number', min: 1, value: p.quantity || '', class: 'qty' });
+    const dateIn = h('input', { type: 'date', value: p.date || '' });
+    // Le pays de l'exploitant choisi dans la liste est repris automatiquement
+    opIn.addEventListener('change', () => {
+      const o = (ops.data || []).find((x) => x.name.toLowerCase() === opIn.value.trim().toLowerCase());
+      if (o && o.country) ctyIn.value = o.country;
+    });
+    const done = (msg) => { el.replaceChildren(h('p', { class: 'small muted' }, msg)); el.classList.add('done'); };
+    const decide = async (status) => supabase.from('review_queue')
+      .update({ status, decided_by: state.session.user.id, decided_at: new Date().toISOString() }).eq('id', it.id);
+
+    const findOrCreateOperator = async () => {
+      const name = opIn.value.trim(); const country = ctyIn.value.trim().toUpperCase() || null;
+      if (!name) { alert('Indiquez le nom de l\'exploitant.'); return null; }
+      let o = (state.operators || []).find((x) => x.name.toLowerCase() === name.toLowerCase() && (!country || x.country === country));
+      if (o) return o;
+      const { data, error } = await supabase.from('operators').insert({ name, country, activities: [], sector: 'civil' }).select().single();
+      if (error) { alert('Création de l\'exploitant impossible : ' + error.message); return null; }
+      state.operators = [...(state.operators || []), data];
+      return data;
+    };
+
+    const validate = async () => {
+      const o = await findOrCreateOperator(); if (!o) return;
+      if (press) {
+        const src = await supabase.from('sources').insert({ kind: 'presse', label: p.source || 'Presse', url: p.link || null,
+          retrieved_on: new Date().toISOString().slice(0, 10), confidence: 3 }).select().single();
+        if (src.error) { alert(src.error.message); return; }
+        const { error } = await supabase.from('orders').insert({ operator_id: o.id, model: modelIn.value.trim() || p.model,
+          quantity: Number(qtyIn.value) || null, announced_on: dateIn.value || null,
+          status: kindIn.value === 'livraison' ? 'livree' : 'annoncee', source_id: src.data.id });
+        if (error) { alert(error.message); return; }
+      } else {
+        const hel = await supabase.from('helicopters').select('id').eq('family', p.family).eq('msn', p.msn).maybeSingle();
+        if (hel.error || !hel.data) { alert('Appareil introuvable dans la base.'); return; }
+        const { error } = await supabase.from('assignments').update({ operator_id: o.id, owner_name: null })
+          .eq('helicopter_id', hel.data.id).is('end_date', null);
+        if (error) { alert(error.message); return; }
+      }
+      const { error } = await decide('valide'); if (error) { alert(error.message); return; }
+      done('Validé : ' + o.name);
+    };
+    const reject = async () => { const { error } = await decide('rejete'); if (error) { alert(error.message); return; } done('Rejeté'); };
+
+    const el = h('article', { class: 'review-card' },
+      h('div', { class: 'review-head' },
+        h('span', { class: 'tag ' + (it.kind === 'commande' ? 'used' : 'new') }, it.kind === 'commande' ? 'Commande' : 'Livraison'),
+        h('strong', {}, it.summary),
+        h('span', { class: 'small muted' }, [p.date ? fmtDate(p.date) : fmtDate(it.created_at), p.source].filter(Boolean).join(' · '))),
+      press && p.title ? h('p', { class: 'review-title' }, h('a', { href: p.link, target: '_blank', rel: 'noopener' }, p.title + ' ↗')) : null,
+      !press ? h('p', { class: 'small muted' }, 'Propriétaire au registre : ' + (p.owner || '?') + (p.city ? ' (' + p.city + ')' : '')) : null,
+      h('div', { class: 'review-fields' },
+        field('Exploitant', opIn), field('Pays', ctyIn),
+        press ? [field('Type', kindIn), field('Modèle', modelIn), field('Quantité', qtyIn), field('Date', dateIn)] : null),
+      h('div', { class: 'row-actions' },
+        h('button', { class: 'pill-btn', type: 'button', onclick: reject }, 'Rejeter'),
+        h('button', { class: 'pill-btn accent', type: 'button', onclick: validate }, press ? 'Valider' : 'Rattacher')));
+    return el;
+  };
+
+  const seg = (key, label, n) => h('button', { type: 'button', class: filter === key ? 'on' : null,
+    onclick: () => { state.reviewFilter = key; renderReview(); } }, label + ' (' + n + ')');
+  render(
+    adminTabs('review'),
+    h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'À vérifier'),
+      h('div', { class: 'sub' }, 'Annonces repérées dans la presse et appareils de loueurs dont l\'exploitant reste à identifier.'))),
+    h('div', { class: 'segmented' }, seg('presse', 'Presse', items.filter(isPress).length), seg('registre', 'Registres', items.filter((x) => !isPress(x)).length)),
+    opNames,
+    shown.length ? h('div', { class: 'review-list' }, shown.slice(0, 200).map(card))
+      : h('p', { class: 'muted center pad' }, 'Rien à vérifier pour le moment.'),
+    shown.length > 200 ? h('p', { class: 'small muted center' }, '200 premières annonces affichées : validez-les pour voir la suite.') : null);
+}
+
 async function renderAdmin() {
   if (state.profile?.role !== 'admin') { location.hash = '#/'; return; }
   render(h('p', { class: 'muted center pad' }, 'Chargement…'));
@@ -721,6 +850,7 @@ async function renderAdmin() {
   const active = data.filter((p) => p.status === 'active').length;
 
   render(
+    adminTabs('users'),
     h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Administration'),
       h('div', { class: 'sub' }, plural(data.length, 'compte') + ' · ' + plural(active, 'actif') +
         (newCount ? ' · ' + newCount + (newCount > 1 ? ' nouveaux' : ' nouveau') + ' depuis votre dernière visite' : '')))),
@@ -768,6 +898,7 @@ async function route() {
     a.classList.toggle('active', (a.dataset.nav === 'admin') === hash.startsWith('#/admin')));
   try {
     if (hash.startsWith('#/exploitant/')) await renderOperator(decodeURIComponent(hash.split('/')[2]));
+    else if (hash.startsWith('#/admin/verifier')) await renderReview();
     else if (hash.startsWith('#/admin')) await renderAdmin();
     else { await loadOperators(); renderList(); }
   } catch (e) {

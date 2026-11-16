@@ -69,26 +69,137 @@ def src_finlande():
         table_source(T.http_get(url), 'FI', 'OH-')
 
 
+def _french_city(address):
+    m = re.search(r'\b(\d{5})\s+(.+?)\s+(FRANCE|CEDEX.*)?$', (address or '').strip())
+    if not m:
+        return ''
+    return re.sub(r'\s+CEDEX.*$', '', m.group(2)).strip()
+
+
+def src_france():
+    url = 'https://immat.aviation-civile.gouv.fr/immat/servlet/static/upload/export.csv'
+    header, rows = T.read_csv(T.http_get(url))
+    idx = {h.strip().upper(): i for i, h in enumerate(header)}
+    need = ['IMMATRICULATION', 'CONSTRUCTEUR', 'MODELE', 'NUMERO_SERIE', 'PROPRIETAIRE', 'LOCATAIRE']
+    missing = [n for n in need if n not in idx]
+    if missing:
+        print('  en-tête :', ' | '.join(header))
+        raise RuntimeError('colonnes absentes : ' + ', '.join(missing))
+    g = lambda r, k: (r[idx[k]].strip() if k in idx and idx[k] < len(r) else '')
+    recs, seen = [], set()
+    for r in rows:
+        reg = g(r, 'IMMATRICULATION').upper()
+        if reg in seen:          # copropriété : une ligne par copropriétaire, on garde la première
+            continue
+        seen.add(reg)
+        lessee = g(r, 'LOCATAIRE')
+        owner = lessee or g(r, 'PROPRIETAIRE')
+        address = g(r, 'ADRESSE_LOCATAIRE') if lessee else g(r, 'ADRESSE_PROPRIETAIRE')
+        recs.append({
+            'registration': reg, 'msn': g(r, 'NUMERO_SERIE'), 'manufacturer': g(r, 'CONSTRUCTEUR'),
+            'registry_model': g(r, 'MODELE'), 'year_built': None, 'owner': owner,
+            'city': _french_city(address).title(), 'region': '', 'country': 'FR', 'address': address.title() or None,
+            'registered_on': None, 'government': T.is_gov(owner),
+        })
+    print('  exemple :', recs[:1])
+    return 'Registre DGAC (France)', 'https://immat.aviation-civile.gouv.fr/immat/servlet/aeronef_liste.html', recs
+
+
+def src_suisse():
+    """Registre suisse : interface publique du site de l'OFAC (BAZL), lue page par page."""
+    import json
+    api = 'https://app02.bazl.admin.ch/web/bazl-backend/lfr'
+    recs, page = [], 1
+    while True:
+        body = json.dumps({'page_result_limit': 1000, 'current_page_number': page, 'sort_list': 'registration',
+                           'language': 'fr', 'queryProperties': {'marketing': '', 'aircraftStatus': ['Registered']}}).encode()
+        req = T.urllib.request.Request(api, data=body, method='POST', headers={
+            'Content-Type': 'application/json', 'Accept': 'application/json', 'User-Agent': T.BROWSER_UA})
+        with T.urllib.request.urlopen(req, timeout=120) as resp:
+            items = json.loads(resp.read())
+        for x in items:
+            d = x.get('details') or {}
+            holders = x.get('ownerOperators') or []
+            pick = next((h for h in holders if 'Operator' in ((h.get('holderCategory') or {}).get('categoryNames') or {}).get('en', '')), None) \
+                or (holders[0] if holders else {})
+            a = pick.get('address') or {}
+            na = lambda v: '' if v in (None, 'N/A') else str(v)
+            rd = d.get('regDate')
+            recs.append({
+                'registration': x.get('registration'), 'msn': na(d.get('serialNumber')), 'manufacturer': x.get('manufacturer') or '',
+                'registry_model': x.get('aircraftModelType') or '', 'typecode': x.get('icaoCode'),
+                'year_built': na(d.get('yearOfManufacture')) or None, 'owner': pick.get('ownerOperator') or '',
+                'city': na(a.get('city')), 'region': '', 'country': 'CH',
+                'address': ', '.join(p for p in [' '.join(p for p in [na(a.get('street')), na(a.get('streetNo'))] if p),
+                                                 ' '.join(p for p in [na(a.get('zipCode')), na(a.get('city'))] if p)] if p) or None,
+                'registered_on': f'{rd[0]:04d}-{rd[1]:02d}-{rd[2]:02d}' if isinstance(rd, list) and len(rd) == 3 else None,
+                'government': T.is_gov(pick.get('ownerOperator')),
+            })
+        if len(items) < 1000:
+            break
+        page += 1
+    return 'Registre OFAC (Suisse)', 'https://app02.bazl.admin.ch/web/bazl/fr/#/lfr/search', recs
+
+
+def src_bresil():
+    import datetime as _dt
+    base = 'https://sistemas.anac.gov.br/dadosabertos/Aeronaves/RAB/'
+    candidates = [base + 'dados_aeronaves.csv']
+    d = _dt.date.today().replace(day=1)
+    for _ in range(4):
+        candidates.append(base + f'Historico_RAB/{d:%Y-%m}.csv')
+        d = (d - _dt.timedelta(days=1)).replace(day=1)
+    last = None
+    for url in candidates:
+        try:
+            data = T.http_get(url)
+            print('  fichier :', url)
+            recs = table_source(data, 'BR', '')
+            for r in recs:
+                reg = (r['registration'] or '').upper()
+                if reg and '-' not in reg and len(reg) == 5:
+                    r['registration'] = reg[:2] + '-' + reg[2:]
+            return 'Registre RAB (Brésil)', 'https://sistemas.anac.gov.br/dadosabertos/Aeronaves/RAB/', recs
+        except Exception as e:
+            last = e
+            print(f'  {url} : {e}')
+    raise last
+
+
+def src_pays_bas():
+    import json
+    api = 'https://data.overheid.nl/data/api/3/action/package_show?id=luchtvaartuigregister'
+    res = json.loads(T.http_get(api))['result']['resources']
+    url = next((r['url'] for r in res if re.search(r'csv', (r.get('format') or '') + r['url'], re.I)), res[0]['url'])
+    print('  fichier :', url)
+    return 'Registre ILT (Pays-Bas)', 'https://data.overheid.nl/dataset/luchtvaartuigregister', \
+        table_source(T.http_get(url), 'NL', 'PH-')
+
+
 def src_canada():
+    """Fichiers sans en-tête. Colonnes observées (nov. 2026) :
+    carscurr : 0 immatriculation, 3 constructeur (nom courant), 4 modèle, 5 n° de série, 7 constructeur complet,
+               22 date d'immatriculation ; carsownr : 0 immatriculation, 1 nom, 5 ville, 6 province."""
     data = T.http_get('https://wwwapps.tc.gc.ca/Saf-Sec-Sur/2/CCARCS-RIACC/download/ccarcsdb.zip')
     _, cur = T.read_csv(T.zip_member(data, r'carscurr'), header=False)
-    cols = T.guess_columns(cur, map_model)
-    print(T.describe([f'col{i}' for i in range(max(map(len, cur[:500])))], cur, cols))
-    if not {'manufacturer', 'model', 'serial', 'registration'} <= set(cols):
-        raise RuntimeError('structure du fichier non reconnue')
-    recs = T.records(None, cur, cols, 'CA', 'C-')
-    # Propriétaires : fichier séparé, relié par l'immatriculation
     _, own = T.read_csv(T.zip_member(data, r'carsownr'), header=False)
-    marks = {r['registration'].replace('C-', '') for r in recs if r['registration']}
-    ocols = T.guess_owner_columns(own, marks)
-    print('  propriétaires :', T.describe([f'col{i}' for i in range(max(map(len, own[:500])))], own, ocols, n=1))
+    c = lambda r, i: r[i].strip() if i < len(r) else ''
     owners = {}
-    for r in T.records(None, own, ocols, 'CA', 'C-'):
-        owners.setdefault(r['registration'], r)
-    for r in recs:
-        o = owners.get(r['registration'])
-        if o:
-            r.update(owner=o['owner'], city=o['city'], region=o['region'], government=o['government'])
+    for r in own:
+        owners.setdefault(c(r, 0), r)
+    recs = []
+    for r in cur:
+        mark = c(r, 0)
+        o = owners.get(mark)
+        name = c(o, 1) if o else ''
+        recs.append({
+            'registration': 'C-' + mark, 'msn': c(r, 5), 'manufacturer': c(r, 3) + ' ' + c(r, 7),
+            'registry_model': c(r, 4), 'year_built': None, 'owner': name,
+            'city': c(o, 5).title() if o else '', 'region': c(o, 6) if o else '', 'country': 'CA',
+            'registered_on': T.parse_date(c(r, 22)), 'government': T.is_gov(name),
+        })
+    sample = [x for x in recs if map_model(x['manufacturer'], x['registry_model'])][:2]
+    print('  exemple :', sample)
     return 'Registre CCARCS (Canada)', 'https://wwwapps.tc.gc.ca/saf-sec-sur/2/ccarcs-riacc/', recs
 
 
@@ -134,13 +245,20 @@ def src_opensky():
             'registry_model': get(r, 'model'), 'typecode': get(r, 'typecode'),
             'year_built': (re.search(r'(19|20)\d\d', get(r, 'built')) or [None])[0],
             'owner': owner, 'city': '', 'region': '', 'country': country,
-            'registered_on': T.parse_date(get(r, 'registered')),
+            'registered_on': T.parse_date(get(r, 'registered')) or
+                             (T.parse_date(get(r, 'firstflightdate')) if 'firstflightdate' in idx else None),
             'government': T.is_gov(owner),
         })
     print(f'  {len(recs)} hélicoptères Airbus dans la base OpenSky hors pays déjà couverts ({skipped} ignorés)')
     by_country = {}
     for r in recs:
         by_country[r['country']] = by_country.get(r['country'], 0) + 1
+    years = {}
+    for r in recs:
+        y = (r['year_built'] or (r['registered_on'] or '')[:4] or 'inconnue')
+        years[y] = years.get(y, 0) + 1
+    print('  années (construction ou immatriculation) :', ', '.join(f'{y} {n}' for y, n in sorted(years.items())[-12:]))
+    print('  sans numéro de série :', sum(1 for r in recs if not r['msn']))
     print('  par pays :', ', '.join(f'{c} {n}' for c, n in sorted(by_country.items(), key=lambda x: -x[1])[:40]))
     return 'Base OpenSky Network (mondiale, communautaire)', 'https://opensky-network.org/aircraft-database', recs
 
@@ -151,7 +269,13 @@ OFFICIAL = {
     'norvege': ('NO', src_norvege),
     'finlande': ('FI', src_finlande),
     'canada': ('CA', src_canada),
+    'france': ('FR', src_france),
+    'suisse': ('CH', src_suisse),
+    'bresil': ('BR', src_bresil),
+    'pays_bas': ('NL', src_pays_bas),
 }
+# Registres sans date d'immatriculation : toute la flotte actuelle est intégrée
+ALL_YEARS = {'france'}
 
 
 def main():
@@ -184,7 +308,7 @@ def main():
                           f"{r['year_built']} {r['registered_on']} {r['owner']} ({r['city']})")
                 print(f'  {len(recent)} dans la période (mode test : rien n\'a été écrit)')
                 return True
-            ingest(store, recs, label, url, since=args.since, confidence=confidence)
+            ingest(store, recs, label, url, since=args.since, confidence=confidence, all_years=name in ALL_YEARS)
             return True
         except Exception as e:
             traceback.print_exc(limit=3)
