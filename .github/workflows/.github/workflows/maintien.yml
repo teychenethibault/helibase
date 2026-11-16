@@ -1,0 +1,16 @@
+name: Maintien de la base
+
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Requête légère sur la base
+        run: |
+          curl -fsS "${{ secrets.SUPABASE_URL }}/rest/v1/update_log?select=id&limit=1" \
+            -H "apikey: ${{ secrets.SUPABASE_SECRET_KEY }}" > /dev/null && echo "Base active"
