@@ -20,7 +20,7 @@ const SECTORS = { civil: 'Civil', etatique: 'Étatique', militaire: 'Militaire' 
 // Europe (UE, Royaume-Uni, Suisse, Norvège, Islande, Balkans, Ukraine, Turquie) : la carte ne sort pas de cette zone
 const EUROPE_BOUNDS = [[-25, 34], [45, 71.5]];
 const EUROPE_MAX = [[-45, 22], [65, 78]];
-const EMPTY_FILTERS = () => ({ q: '', country: '', model: '', activity: '', period: '', favOnly: false, sector: 'all' });
+const EMPTY_FILTERS = () => ({ q: '', country: '', model: '', activity: '', period: '', favOnly: false, sector: 'all', showUnknown: false });
 // Propriétaires privés (holdings, particuliers) écartés : on ne garde un exploitant civil nommé par un registre
 // que si quelque chose montre que c'est une vraie entreprise d'hélicoptères ou un service public.
 const AVIATION_NAME = /h[ée]li|hélico|helico|helikopter|hubschrauber|elicott|helicop|\bair|aero|aéro|avia|flug|luft|rotor|wing|sky|fly|jet\b|samu|smur|rega\b|police|polizei|politi|gendarm|sécurité civile|securite civile|protection civile|civil protection|douane|zoll|minist|armée|forces|army|navy|guard|garde|secours|rescue|ambulan|medic|hems|offshore|charter|taxi|travail aérien|travaux aériens|bergbahn|rettung|redning|pelastus|soccorso|emergenc/i;
@@ -45,7 +45,7 @@ const state = {
   profile: null,
   operators: [],
   favorites: new Set(),
-  filters: { q: '', country: '', model: '', activity: '', period: '', favOnly: false, sector: 'all' },
+  filters: { q: '', country: '', model: '', activity: '', period: '', favOnly: false, sector: 'all', showUnknown: false },
   view: 'both',        // 'both' | 'list' | 'map'
   syncMap: true,       // la liste suit la zone visible de la carte
   bounds: null,
@@ -437,6 +437,7 @@ function filteredOperators() {
     if (f.sector === 'militaire' && o.sector !== 'militaire') return false;
     if (f.sector === 'civil' && o.sector === 'militaire') return false;
     if (f.favOnly && !state.favorites.has(o.id)) return false;
+    if (o.is_placeholder && !f.showUnknown) return false;     // appareils sans exploitant connu : masqués par défaut
     if (f.country && o.country !== f.country) return false;
     if (f.model && !(o.models || []).includes(f.model)) return false;
     if (f.activity && !(o.activities || []).includes(f.activity)) return false;
@@ -520,7 +521,7 @@ function renderList() {
     updateMapData();
     refreshList();
     toolbar.querySelectorAll('.chip-select').forEach((c) => c.classList.toggle('set', !!c.querySelector('select').value));
-    const any = f.q || f.country || f.model || f.activity || f.period || f.favOnly || f.sector !== 'all';
+    const any = f.q || f.country || f.model || f.activity || f.period || f.favOnly || f.sector !== 'all' || f.showUnknown;
     clearBtn.classList.toggle('visible', !!any);
   }
 
@@ -551,6 +552,13 @@ function renderList() {
     onclick: () => { f.favOnly = !f.favOnly; favChip.classList.toggle('on', f.favOnly); refreshAll(); } },
     h('span', { class: 'dot-star' }, '★'), 'Mes favoris');
 
+  const unknownCount = state.operators.filter((o) => o.is_placeholder)
+    .reduce((n, o) => n + (o.fleet_count || 0) + (o.planned_count || 0), 0);
+  const unknownChip = unknownCount ? h('button', { class: 'toggle-chip' + (f.showUnknown ? ' on' : ''), type: 'button',
+    title: 'Appareils dont l\'exploitant n\'est pas encore connu, regroupés par pays',
+    onclick: () => { f.showUnknown = !f.showUnknown; unknownChip.classList.toggle('on', f.showUnknown); refreshAll(); } },
+    'Exploitant inconnu (' + unknownCount + ')') : null;
+
   const toolbar = h('div', { class: 'toolbar' },
     h('div', { class: 'search' }, svg(ICON_SEARCH),
       h('input', { type: 'search', placeholder: 'Rechercher un exploitant, une ville…', value: f.q,
@@ -559,7 +567,7 @@ function renderList() {
     chip('model', 'Modèle', models.map((m) => [m, m])),
     chip('activity', 'Activité', ACTIVITIES.map((a) => [a, a])),
     chip('period', 'Période', [...yearsOptions(), ['prevu', 'Livraison prévue']]),
-    favChip, sectorSwitch, clearBtn);
+    favChip, unknownChip, sectorSwitch, clearBtn);
 
   const views = [['both', 'Liste et carte'], ['list', 'Liste'], ['map', 'Carte']];
   const seg = h('div', { class: 'segmented', role: 'tablist' });
@@ -575,7 +583,7 @@ function renderList() {
   render(
     h('div', { class: 'page-head' },
       h('div', {}, h('h1', {}, 'Exploitants'),
-        h('div', { class: 'sub' }, plural(state.operators.length, 'exploitant') + ' · hélicoptères Airbus neufs livrés en Europe depuis 2024')),
+        h('div', { class: 'sub' }, ((n) => plural(n, 'exploitant') + (n > 1 ? ' identifiés' : ' identifié'))(state.operators.filter((o) => !o.is_placeholder).length) + ' · hélicoptères Airbus neufs livrés en Europe depuis 2024')),
       seg),
     toolbar, explorer);
   applyView();
